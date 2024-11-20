@@ -1,0 +1,25 @@
+services:
+  python:
+    container_name: python1
+    build:
+      dockerfile: Dockerfile
+
+  postgres:
+    container_name: postgres1
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: db
+    ports:
+      - 5432:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "db" ]
+      interval: 5s
+      retries: 5
+    restart: always
+
+volumes:
+  postgres_data:

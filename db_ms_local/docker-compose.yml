@@ -1,0 +1,17 @@
+services:
+  mssql:
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_USER : sa
+      MSSQL_SA_PASSWORD: UserPassword11@
+      MSSQL_TCP_PORT: 1433
+    container_name: sql-server
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: always
+    ports:
+      - 1433:1433
+    volumes:
+      - mssql_vol:/var/opt/mssql
+      - ./init-scripts:/docker-entrypoint-initdb.d
+volumes:
+  mssql_vol:
