@@ -1,40 +1,28 @@
-from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
-from requests import get
-
-BASE_URL = 'https://learnonline.hse.ru/python-as-foreign/1/10.html'
-
-page = get(BASE_URL)
-# page.encoding = 'utf-8'
-# print(page.encoding)
-# print(page.content.decode())
-# print(page.content)
-# soup = BeautifulSoup(page.content, "html.parser")
-# links = soup.find_all('a')
-# for link in links:
-#     print(link)
-    # if link.has_attr('href'):
-    #     print(link['href'])
-
-page = get('https://online.hse.ru/python-as-foreign/1333/')
-print(page.status_code)
+from datetime import date
 
 
+class Car:
+    def __init__(self, brand, age):
+        self.brand = brand
+        self.age = age
 
-# def get_page_len(link):
-#     page = get(BASE_URL + link)
-#     if page.status_code == 200:
-#         page.encoding = 'utf-8'
-#         s = BeautifulSoup(page.text, "html.parser")
-#         print(f'The article length is {len(s.find("body").text)} symbols.')
-#         s.encode()
+    @classmethod
+    def from_production_year(cls, brand, prod_year):
+        return cls(brand, date.today().year - prod_year)
+
+    @staticmethod
+    def is_warranty_active(age):
+        return age < 3
+
+    def info(self):
+        print("Car: " + self.brand)
+        print("Age: " + str(self.age))
+        if self.is_warranty_active(self.age):
+            print("Warranty is ACTIVE")
+        else:
+            print("Warranty is NOT active")
 
 
-# link_list = [
-#     link.get('href')
-#     for link in soup.find_all('a')
-#     if link.get('href').endswith('html')
-# ]
+a = Car('aaa', 30)
+a.is_warranty_active()
 
-# with ThreadPoolExecutor() as executor:
-#     executor.map(get_page_len, link_list)

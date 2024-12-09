@@ -1,3 +1,7 @@
-pytest==8.3.3
+pytest
 requests
 bs4
+pandas
+selenium
+matplotlib
+webdriver_manager
