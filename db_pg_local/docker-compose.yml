@@ -1,9 +1,4 @@
 services:
-  python:
-    container_name: python1
-    build:
-      dockerfile: Dockerfile
-
   postgres:
     container_name: postgres1
     image: postgres:16.4-alpine

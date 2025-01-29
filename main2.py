@@ -1,23 +1,12 @@
-class NullFilledDF:
-    def __init__(self, df: pd.DataFrame):
-        self.df = df
+import pandas as pd
 
-    def __getitem__(self, item):
-        return self.df[item]
+a = {
+    'a': [1, 2, 3],
+    'b': [4, 5, 6],
+    'c': [7, 8, 9],
+}
 
-    def fill_nulls(self) -> 'NullFilledDF':
-        self.df['first_day_exposition'] = pd.to_datetime(self.df['first_day_exposition']).dt.normalize()
-        self.df['balcony'] = self.df['balcony'].fillna(0)
-        self.df['ponds_nearest'] = self.df['ponds_nearest'].fillna(0)
-        self.df['is_apartment'] = self.df['is_apartment'].astype(bool).fillna(False)
-        return self
+df = pd.DataFrame(a)
 
-    def add_m2_price(self) -> 'NullFilledDF':
-        self.df['price_per_m2'] = (self.df['last_price'] / self.df['total_area']).round(2)
-        return self
+print(df.sort_values(['a', 'b'], ascending=[True, False]))
 
-    def get_df(self) -> pd.DataFrame:
-        return self.df
-
-df = NullFilledDF(df)
-df = df.add_m2_price()
