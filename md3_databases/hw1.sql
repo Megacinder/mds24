@@ -114,6 +114,8 @@ drop table if exists building      cascade;
 drop table if exists room          cascade;
 drop table if exists booking       cascade;
 drop table if exists building_copy cascade;
+drop table if exists window_view   cascade;
+
 
 create table guest (
      guest_id  int           generated always as identity primary key
@@ -134,15 +136,20 @@ create table building (
 ;
 
 
+create table window_view (
+    val text unique
+);
+
+
 create table room (
      id            int         generated always as identity primary key
     ,square_m2     float not null
     ,bed_count     float not null -- sometimes it can be 1.5 beds
-    ,window_view   json  -- to have an opportunity to expand parameters, and if we need to have a structure
+    ,window_view   text  not null references window_view (val)
     ,guest_count   int
-    ,number        int not null
-    ,store         int not null
-    ,building_code text not null references building (code)
+    ,number        int   not null
+    ,store         int   not null
+    ,building_code text  not null references building (code)
 )
 ;
 
@@ -166,14 +173,22 @@ values
 ;
 
 
+insert into window_view
+values
+     ('garden')
+    ,('pool')
+    ,('ocean')
+;
+
+
 insert into
     room (square_m2, bed_count, window_view, guest_count, number, store, building_code)
 values
-     (55.5, 2,   '{"garden": "almost"}',                    3, 1,  1,  '1')
-    ,(33,   1.5, '{"garden": "yes", "ocean": "of course"}', 2, 2,  2,  '1')
-    ,(40.1, 1,   '{"pool": "yes", "ocean": "a bit"}',       2, 2,  2,  '1')
-    ,(55,   5,   '{"garden": "yes"}',                       5, 44, 10, '3A')
-    ,(12,   1,   '{"ocean": "yes"}',                        1, 33, 15, '3A')
+     (55.5, 2,   'garden', 3, 1,  1,  '1')
+    ,(33,   1.5, 'garden', 2, 2,  2,  '1')
+    ,(40.1, 1,   'pool',   2, 2,  2,  '1')
+    ,(55,   5,   'garden', 5, 44, 10, '3A')
+    ,(12,   1,   'ocean',  1, 33, 15, '3A')
 ;
 
 
