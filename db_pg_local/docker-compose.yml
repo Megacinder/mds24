@@ -3,16 +3,16 @@ services:
     container_name: postgres1
     image: postgres:16.4-alpine
     environment:
-      POSTGRES_USER: admin
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: admin
-      POSTGRES_DB: db
     ports:
       - 5432:5432
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
     healthcheck:
-      test: [ "CMD", "pg_isready", "-U", "db" ]
-      interval: 5s
+      test: [ "CMD", "pg_isready", "-U", "admin", "-d", "postgres" ]
+      interval: 60s
       retries: 5
     restart: always
 
