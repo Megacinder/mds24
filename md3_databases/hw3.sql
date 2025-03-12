@@ -209,22 +209,33 @@ where 1=1
 
 -- 7
 
-select distinct
+with wt_asia_and_africa as (
+    select
+         array_agg(b.code) filter (where b.continent = 'Asia'  )  as asia_code_arr
+        ,array_agg(b.code) filter (where b.continent = 'Africa')  as africa_code_arr
+    from
+        country  b
+    where 1=1
+        and b.continent in ('Asia', 'Africa')
+)
+
+select
      a.language
     ,current_timestamp
 from
     countrylanguage  a
+    cross join wt_asia_and_africa  b
 where 1=1
-    and a.countrycode in (
-        select
-            b.code
-        from
-            country  b
-        where 1=1
-            and b.continent in ('Asia', 'Africa')
-    )
+group by
+     a.language
+    ,b.asia_code_arr
+    ,b.africa_code_arr
+having 1=1
+    and array_agg(a.countrycode) && b.asia_code_arr
+    and array_agg(a.countrycode) && b.africa_code_arr
 order by
     a.language
+
 
 
 
