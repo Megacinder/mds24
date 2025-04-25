@@ -1,40 +1,46 @@
 import numpy as np
 
-from decimal import Decimal, getcontext, ROUND_UP, ROUND_HALF_UP
-
-import math
-
-
-# defining round_half_up
-
-def round2(number: int | float, precision: int = 0) -> float:
-    from math import floor
-    multiplier = 10 ** precision
-    return floor(number * multiplier + 0.5) / multiplier
+A = np.array([[1,2],
+              [3,-4]])
+B = np.array([[2, 0],
+              [0, 1]])
+C = np.array([[1, -2, 0],
+              [3, 0, -1]])
 
 
-# def round2(number: float, precision: int = 0) -> float:
-#     from decimal import Decimal
-#     a = Decimal(number)
-#     a = a.quantize(Decimal(f"1.{'0' * precision}"))
-#     return a
+det_a = np.linalg.det(A)
+det_b = np.linalg.det(B)
+try:
+    det_c = np.linalg.det(C)
+except np.linalg.LinAlgError:
+    det_c = 'undefined'
 
-b = round2(6.45, 1)
+print("determinants: ")
+print(det_a, det_b, det_c, sep='\n')
 
-print(b)
+eigval_a, eigvec_a = np.linalg.eig(A)
+eigval_b, eigvec_b = np.linalg.eig(B)
+try:
+    eigval_c, eigvec_c = np.linalg.eig(C)
+except np.linalg.LinAlgError:
+    eigval_c, eigvec_c = 'undefined', 'undefined'
 
-# a = 6.50001
-# def round2()
-# b = np.where(a - np.floor(a) < 0.5, np.floor(a), np.ceil(a))
-# print(b)
+print("eigevals: ")
+print(eigval_a, eigval_b, eigval_c, sep='\n')
 
-# rnd = lambda v, p=0: round(v * (10 ** p)) / (10 ** p)
+print("eigevecs: ")
+print(eigvec_a, eigvec_b, eigvec_c, sep='\n')
 
-# a = 6.5
-# b = Decimal(a).to_integral_value(rounding=ROUND_HALF_UP, )
-# print(b)
 
-# getcontext().rounding = ROUND_UP
-# # print(getcontext())
-# b = round(Decimal(6.5))
-# print(b)
+inv_a = np.linalg.inv(A)
+inv_b = np.linalg.inv(B)
+try:
+    inv_c = np.linalg.inv(C)
+except np.linalg.LinAlgError:
+    inv_c = 'undefined'
+
+
+print("inverse matrices: ")
+print(inv_a, inv_b, inv_c, sep='\n')
+
+

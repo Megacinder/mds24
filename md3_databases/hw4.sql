@@ -208,6 +208,70 @@ group by
     ,city_totaldue
 
 
+-- 3 ver 2
+
+with wt_par as (
+    select
+         date'2013-05-01'  as from_dt
+        ,date'2013-05-31'  as to_dt
+    limit 1
+)
+
+,wt_all_data as (
+    select
+        -- sh1.salesordernumber  -- is null everywhere so I use salesorderid
+         --coalesce(sh1.purchaseordernumber, 'none')  as order_num
+         sh1.salesorderid  as order_num
+        ,pr1.name  as product_name
+        ,ad1.city  as delivery_city
+        ,sh1.totaldue
+        ,max(sh1.totaldue) over (partition by sh1.salesorderid)  as max_totaldue
+        ,pr1.productnumber
+        ,sum(sh1.totaldue) over (partition by ad1.city)  as city_totaldue
+    from
+        salesorderheader  sh1
+
+        join wt_par  pa1
+            on  sh1.orderdate >= pa1.from_dt
+            and sh1.orderdate <  pa1.to_dt + 1
+
+        join salesorderdetail  sd1
+            on sd1.salesorderid = sh1.salesorderid
+
+        join product  pr1
+            on pr1.productid = sd1.productid
+
+    --    left join customeraddress  ca1
+    --        on ca1.customerid = sh1.customerid
+
+        left join address  ad1
+            --on ad1.addressid = ca1.addressid
+            on ad1.addressid = sh1.shiptoaddressid
+    where 1=1
+)
+
+select
+     order_num
+    ,count(distinct product_name)  as uniq_product_cnt
+    ,delivery_city
+    ,round(coalesce(sum(totaldue) / nullif(city_totaldue, 0), 0), 3)  as totaldue_city_rate
+
+    -- UPD 2025-03-20: there can be several products with a maximum totaldue
+    -- ,(array_agg(product_name order by totaldue desc))[1] as max_totaldue_product
+    ,array_to_string(array_agg(product_name) filter (where totaldue = max_totaldue), ', ')  as max_totaldue_product
+
+    ,string_agg(productnumber, ', ')  as productnumber_list
+    ,current_timestamp
+from
+    wt_all_data
+where 1=1
+group by
+    order_num
+    ,delivery_city
+    ,city_totaldue
+
+
+
 -- 4
 
 with wt_par as (
@@ -324,21 +388,122 @@ with wt_par as (
         ,lag(amt, 2, 0) over (order by dt) * 3  as t_minus_2_amt
         ,lag(amt, 3, 0) over (order by dt) * 2  as t_minus_3_amt
         ,lag(amt, 4, 0) over (order by dt) * 1  as t_minus_4_amt
+
+        ,count(1) over (order by dt rows between 4 preceding and current row)  as prev_5_rows
     from
         wt_amt_for_dt
+)
+
+,wt_prev_5_rows as (
+    select
+        *
+        ,case prev_5_rows
+            when 1 then 5
+            when 2 then 5 + 4
+            when 3 then 5 + 4 + 3
+            when 4 then 5 + 4 + 3 + 2
+            when 5 then 5 + 4 + 3 + 2 + 1
+            else -1
+         end  as demoninator
+    from
+        wt_ma_5_days
 )
 
 select
      dt
     ,ma_5_days
-    ,t_amt + t_minus_1_amt + t_minus_2_amt + t_minus_3_amt + t_minus_4_amt  as weighted_ma_5_days
+
+     -- UPD 2025-03-20: forgot to add denominator (5 + 4 + 3 + 2 + 1)
+    ,(t_amt + t_minus_1_amt + t_minus_2_amt + t_minus_3_amt + t_minus_4_amt) / demoninator  as weighted_ma_5_days
     ,current_timestamp
 from
-    wt_ma_5_days
+    wt_prev_5_rows
 where 1=1
 order by
     dt
 
+
+-- 5 ver 2
+
+with wt_par as (
+    select
+         date'2013-05-01'  as from_dt
+        ,date'2013-05-31'  as to_dt
+        ,5  as offset
+    limit 1
+)
+
+,wt_offset as (
+    select
+         id.id
+        ,pa1.offset - id + 1  as multiplier
+        ,sum(pa1.offset - id + 1) over (order by id.id rows between unbounded preceding and current row)  as denominator
+    from
+        wt_par  pa1
+        join lateral generate_series(1, pa1.offset) as id on true
+    where 1=1
+)
+
+,wt_amt_for_dt as (
+    select
+         sh1.orderdate::date  as dt
+        ,sum(sh1.totaldue)  as amt
+    from
+        salesorderheader  sh1
+        join wt_par  pa1
+            on  sh1.orderdate >= pa1.from_dt
+            and sh1.orderdate <  pa1.to_dt + 1
+    where 1=1
+    group by
+        sh1.orderdate::date
+)
+
+,wt_arr as (
+    select
+         dt
+        ,amt
+        ,array_agg(amt) over (order by dt rows between 4 preceding and current row)  as arr_5_days
+    from
+        wt_amt_for_dt
+    group by
+         dt
+        ,amt
+)
+
+,wt_reversed_arr as (
+    select
+         dt
+        ,amt
+        ,avg(amt) over (order by dt rows between 4 preceding and current row)  as ma_5_days
+        ,array(
+            select
+                val
+            from
+                unnest(arr_5_days) with ordinality as arr (val, i)
+            order by
+                i desc
+        ) as reversed_arr_5_days
+    from
+        wt_arr
+)
+
+select
+     a.dt
+    ,a.ma_5_days
+    ,sum(val * of1.multiplier) / max(of1.denominator)  as weighted_ma_5_days
+    ,current_timestamp
+from
+    wt_reversed_arr  a
+
+    join lateral unnest(a.reversed_arr_5_days) with ordinality as arr (val, i) on true
+
+    join wt_offset  of1
+        on of1.id = arr.i
+group by
+     a.dt
+    ,a.ma_5_days
+order by
+    a.dt
 
 
 
@@ -398,6 +563,8 @@ with wt_par as (
         join wt_start_stop_dt  ss
             on  ss.start_dt <= a.arrive_dt
             and ss.stop_dt  >= a.depart_dt
+            -- UPD 2023-03-21: flights in the air!
+            and ss.stop_dt  <  a.arrive_dt
     where 1=1
     group by
          ss.start_dt
@@ -439,3 +606,57 @@ where 1=1
 order by
      coalesce(air1.start_dt, fin1.start_dt)
     ,coalesce(air1.stop_dt,  fin1.stop_dt )
+
+
+
+
+select distinct
+     actual_departure  as depart_dt
+    ,actual_arrival    as arrive_dt
+from
+    flights  a
+
+
+
+with wt_all_periods as (
+    select distinct
+         actual_departure
+        ,actual_arrival
+    from
+        flights
+    where 1=1
+)
+
+select
+     b.actual_departure
+    ,b.actual_arrival
+    ,count(1)  as flight_cnt
+from
+    flights  a
+    join wt_all_periods  b
+        on  -- тут надо придумать, как их соединить
+where 1=1
+group by
+     b.actual_departure
+    ,b.actual_arrival
+
+
+with wt_all_periods as (
+    select distinct
+         actual_departure
+        ,actual_arrival
+    from
+        flights
+)
+
+select
+     b.actual_departure
+    ,b.actual_arrival
+    ,count(1)  as flight_cnt
+from
+    flights  a
+    join wt_all_periods  b
+        on  -- тут надо придумать, как их соединить
+group by
+     b.actual_departure
+    ,b.actual_arrival
