@@ -5,3 +5,9 @@ pandas
 selenium
 matplotlib
 webdriver_manager
+scikit-learn
+pendulum
+apache-airflow
+scipy
+IPython
+numpy
