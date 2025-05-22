@@ -1,0 +1,1 @@
+aws s3 ls s3://gsb2024airflow/ --endpoint-url=https://storage.yandexcloud.net --profile=dbdwh

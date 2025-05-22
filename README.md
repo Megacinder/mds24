@@ -43,3 +43,14 @@ username = admin
 password = admin
 
 7. Ну и мы на сервере. Далее можно создать базу и какую-нить табличку:
+
+
+
+## Локальный airflow на Win (чтоб pycharm не подсвечивал ошибки в коде дагов)
+
+0. Заходим в свой репозиторий (типа cd c:\user\pycharmprojects\hse24_repo)
+1. python -m venv .venv
+2. .\.venv\Scripts\activate
+3. python.exe -m pip install --upgrade pip  
+4. pip install "apache-airflow=2.10.5"
+5. pip install apache-airflow[postgres,amazon]==2.10.5

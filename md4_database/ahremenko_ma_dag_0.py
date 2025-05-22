@@ -1,4 +1,4 @@
-# aws s3 cp ahremenko_ma_dag_0.py s3://gsb2024airflow/ahremenko_ma_dag_0.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
+# aws s3 cp ahremenko_ma_dag_2.py s3://gsb2024airflow/ahremenko_ma_dag_0.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
