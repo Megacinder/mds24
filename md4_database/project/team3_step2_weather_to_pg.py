@@ -9,7 +9,7 @@ from airflow.utils.log.logging_mixin import LoggingMixin
 
 from datetime import datetime
 from gzip import open as gzip_open
-from typing import Generator, Any
+from typing import Generator, Any, List
 
 
 logger = LoggingMixin().log
@@ -27,6 +27,16 @@ CSV_GZ_FILE_DICT = {
 TARGET_CSV_BUCKET = "gsbdwhdata"
 PG_CONN_ID = "con_dwh_2024_s004"
 PG_TARGET_TABLE = "ods.weather"
+SQL_IS_PG_TABLE_EXISTS = f"""
+select
+    exists(
+        select
+        from
+            pg_tables
+        where 1=1
+            and schemaname || '.' || tablename = '{PG_TARGET_TABLE}'
+    )
+"""
 
 DAG_PARAM = dict(
     dag_id=f"{DAG_PREFIX}_weather_airport",
@@ -61,12 +71,13 @@ def get_line_from_gzip_generator(gz_filename: str, start_line: int = 7) -> Gener
             yield decoded_line.split(';')
 
 
-def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6) -> list:
+def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, stop_line: int = None) -> list:
     """
     get all rows from csv.gz as a list
     :param gz_filename: filename
     :param icao_code: code for insert to table in PG
-    :param start_line: exclude some lines as they are not needed
+    :param start_line: exclude some lines before as they are not needed
+    :param stop_line: exclude some lines after if they are not needed
     :return: list of lines
     """
     o_list = []
@@ -81,20 +92,20 @@ def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6) -
             )[:-1]
             o_list.append([icao_code] + decoded_line.split(';'))
     # o_list = list(set(o_list))  # deduplication
-    o_list = o_list[start_line:]
+    if stop_line and start_line > stop_line:
+        stop_line = None
+    o_list = o_list[start_line:stop_line]
     return o_list
 
 
-def get_table_dml_and_rows_for_insert(file_path: str, icao_code: str) -> tuple:
+def get_table_dml_and_rows_for_insert(lines: List[list]) -> tuple:
     """
     gives table dml and rows for insert to table in PG
-    :param file_path: file path
-    :param icao_code: code for insert to table in PG
+    :param lines: lines of CSV file as list of lists
     :return: table dml and rows list
     """
-    lines = get_lines_from_gzip(file_path, icao_code)
     headers = lines[0]
-    headers = ["icao_code", "local_time"] + headers[2:]
+    headers = ["icao_code", "local_time"] + [f"raw_{col_name.lower()}" for col_name in headers[2:]]
 
     columns = [f'"{header}" TEXT' for header in headers]
     create_table_sql = f"""
@@ -127,18 +138,7 @@ def dag1() -> None:
         conn = postgres_hook.get_conn()
         cur = conn.cursor()
 
-        sql_is_table_exists = f"""
-        select
-            exists(
-                select
-                from
-                    pg_tables
-                where 1=1
-                    and schemaname || '.' || tablename = 'ods.weather'
-            )
-        """
-
-        cur.execute(sql_is_table_exists)
+        cur.execute(SQL_IS_PG_TABLE_EXISTS)
         is_table_exists = cur.fetchone()[0]
         logger.info("Is table exists: " + str(is_table_exists))
 
@@ -146,7 +146,7 @@ def dag1() -> None:
             sql_truncate_table = f"truncate table {PG_TARGET_TABLE}"
             logger.info(sql_truncate_table)
             cur.execute(sql_truncate_table)
-
+            conn.commit()
 
         for icao_code, csv_gz_file in CSV_GZ_FILE_DICT.items():
             file_path = s3_hook.download_file(
@@ -154,10 +154,12 @@ def dag1() -> None:
                 bucket_name=TARGET_CSV_BUCKET,
             )
 
-            rows, create_table_sql = get_table_dml_and_rows_for_insert(file_path, icao_code)
-            logger.info("If table not exists then " + create_table_sql)
-
+            lines = get_lines_from_gzip(file_path, icao_code)
+            rows, create_table_sql = get_table_dml_and_rows_for_insert(lines)
             cur.execute(create_table_sql)
+            conn.commit()
+
+            logger.info("If table not exists then " + create_table_sql)
 
             logger.info(rows[0])
             for row in rows:
@@ -168,10 +170,8 @@ def dag1() -> None:
                     )
                 """
                 cur.execute(sql_insert_row)
-
-            conn.commit()
-
             logger.info(rows[-1])
+            conn.commit()
 
 
     create_table_and_insert_rows_from_gzip()
@@ -187,6 +187,7 @@ if __name__ == "__main__":
 
     DB_AIRPORT_WEATHER_PATH = getenv("DB_AIRPORT_WEATHER_PATH")
     CSV_GZ_FILE = f"{DB_AIRPORT_WEATHER_PATH}/KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz"
+    ICAO_CODE = "KFLG"
 
     # gen = get_line_from_gzip_generator(CSV_GZ_FILE)
     # print(next(gen))
@@ -194,8 +195,7 @@ if __name__ == "__main__":
     # print(next(gen))
 
     # rows1 = get_lines_from_gzip(CSV_GZ_FILE)
-    rows1, dml = get_table_dml_and_rows_for_insert(CSV_GZ_FILE)
-    print(rows1)
-    print(dml)
-    for row1 in rows1[:4]:
+    lines1 = get_lines_from_gzip(CSV_GZ_FILE, ICAO_CODE, stop_line=9)
+    rows1, dml1 = get_table_dml_and_rows_for_insert(lines1)
+    for row1 in rows1:
         print(row1)
