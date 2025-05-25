@@ -75,8 +75,8 @@ create table if not exists dds.weather (
 with wt_par as (
     select
 --        '{KFLG}' :: text[]  as airport_arr
---        ,date'2024-12-01'   as from_dt
---        ,date'2024-12-07'   as to_dt
+--        ,date'2024-12-10'   as from_dt
+--        ,date'2024-12-15'   as to_dt
 
          null :: text[]  as airport_arr
         ,null :: date  as from_dt
@@ -94,11 +94,11 @@ with wt_par as (
         ,stg1.max_gust_10m_meters_per_sec  as max_gws
         ,stg1.temperature_celc_deegree     as t_deg
 
---        ,md5(  -- doesnt' work - two equal values for different rows !!!
---               coalesce(stg1.wind_speed_meters_per_sec   :: text, '')
---            || coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
---            || coalesce(stg1.temperature_celc_deegree    :: text, '')
---        )  as hash
+		-- ,md5(  -- doesnt' work - two equal values for different rows !!!
+		--        coalesce(stg1.wind_speed_meters_per_sec   :: text, '')
+		--     || coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
+		--     || coalesce(stg1.temperature_celc_deegree    :: text, '')
+		-- )  as hash
 
         ,concat_ws(
              '::'
@@ -106,6 +106,8 @@ with wt_par as (
             ,coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
             ,coalesce(stg1.temperature_celc_deegree    :: text, '')
         )  as hash
+
+        ,localtimestamp  as load_dt
     from
         stg.weather  stg1
 
@@ -122,27 +124,39 @@ with wt_par as (
 
 ,wt_dds_table as (
     select
-         2  as priority
-        ,airport_rk
-        ,valid_from  as dt
+         case when b.airport_rk is not null then 0 else 2 end  as priority
+        ,a.airport_rk
+        ,a.valid_from  as dt
 
-        ,w_speed
-        ,max_gws
-        ,t_deg
+        ,a.w_speed
+        ,a.max_gws
+        ,a.t_deg
 
---        ,md5(  -- doesnt' work - two equal values for different rows !!!
---               coalesce(w_speed :: text, '')
---            || coalesce(max_gws :: text, '')
---            || coalesce(t_deg   :: text, '')
---        )  as hash
+        -- ,md5(  -- doesnt' work - two equal values for different rows !!!
+        --        coalesce(w_speed :: text, '')
+        --     || coalesce(max_gws :: text, '')
+        --     || coalesce(t_deg   :: text, '')
+        -- )  as hash
         ,concat_ws(
              '::'
-            ,coalesce(w_speed :: text, '')
-            ,coalesce(max_gws :: text, '')
-            ,coalesce(t_deg   :: text, '')
+            ,coalesce(a.w_speed :: text, '')
+            ,coalesce(a.max_gws :: text, '')
+            ,coalesce(a.t_deg   :: text, '')
         )  as hash
+
+        -- if the data exists than this is the old data - don't change the load_dt
+        ,a.load_dt  as load_dt
     from
-        dds.weather
+        dds.weather  a
+        left join wt_stg_table  b
+            on  b.airport_rk = a.airport_rk
+            and b.dt         = a.valid_from
+            and b.hash       = concat_ws(
+                 '::'
+                ,coalesce(a.w_speed :: text, '')
+                ,coalesce(a.max_gws :: text, '')
+                ,coalesce(a.t_deg   :: text, '')
+            )
     where 1=1
 )
 
@@ -159,7 +173,7 @@ with wt_par as (
     select
         *
     from
-        wt_dds_table
+        wt_dds_table  a
     where 1=1
 )
 
@@ -173,7 +187,10 @@ with wt_par as (
         ,(array_agg(max_gws order by priority))[1]  as max_gws
         ,(array_agg(t_deg   order by priority))[1]  as t_deg
         ,(array_agg(hash    order by priority))[1]  as hash
+        ,(array_agg(load_dt order by priority))[1]  as load_dt
+        -- ,(array_agg(load_dt order by priority))  as load_dt_arr
         ,count(1)  as array_len
+        ,min(priority)  as highest_priority
     from
         wt_stg_table_wo_dds
     group by
@@ -187,6 +204,7 @@ with wt_par as (
         airport_rk
         ,dt
         ,hash
+        ,load_dt
         ,lag(hash, 1, hash) over (partition by airport_rk order by dt)  as prev_hash
     from
         wt_old_period_priority
@@ -231,6 +249,8 @@ with wt_par as (
             order by
                 min(dt)
         ) - interval '1 millisecond'  as valid_to
+
+        ,max(load_dt)  as load_dt
     from
         wt_group_key
     where 1=1
@@ -264,7 +284,7 @@ with wt_par as (
 
         ,period1.valid_from
         ,period1.valid_to
-        ,localtimestamp  as load_dt
+        ,period1.load_dt
     --    ,period1.collapsed_row_cnt
     from
         wt_valid_period  period1
@@ -311,6 +331,7 @@ select
 
     ,valid_from
     ,valid_to
+    ,load_dt
 from
     wt_fin
 where 1=1

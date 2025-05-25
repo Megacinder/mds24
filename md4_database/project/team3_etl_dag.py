@@ -31,10 +31,14 @@ class SuppressRequestsFilter(Filter):
 ROOT_FILE_PATH = "ahremenko_ma"
 DAG_TAG = "team_3"
 
-SOURCE_BUCKET = "db01-content"
 AIRPORT_CSV_URL = "https://ourairports.com/data/airports.csv"
 AIRPORT_CSV_PATH = f"{ROOT_FILE_PATH}/airports.csv"
 TARGET_CSV_BUCKET = "gsbdwhdata"
+
+
+FLIGHT_SOURCE_BUCKET = "db01-content"
+FLIGHT_SOURCE_PATH = "flights"
+FLIGHT_FILE_NAME_TEMPLATE = "T_ONTIME_REPORTING-"
 
 AWS_CONN_ID = "object_storage_yc"
 PG_CONN_ID = "con_dwh_2024_s004"
@@ -42,6 +46,7 @@ PG_DB_NAME = "dwh_2024_s004"
 
 ODS_WEATHER_TABLE = "ods.weather"
 ODS_AIRPORT_TABLE = "ods.airport"
+ODS_FLIGHT_TABLE = "ods.flight"
 
 WEATHER_CSV_GZ_FILE_LIST = {
     "KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
@@ -66,13 +71,10 @@ DAG_PARAM = dict(
 )
 
 
-try:
-    is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed")
-    if is_downloading_needed in ('True', 'False', '1', '0'):
-        is_downloading_needed = bool(is_downloading_needed)
-    else:
-        is_downloading_needed = False
-except KeyError:
+is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed", default_var=False)
+if is_downloading_needed in ('True', 'False', '1', '0'):
+    is_downloading_needed = bool(is_downloading_needed)
+else:
     is_downloading_needed = False
 
 
@@ -214,10 +216,9 @@ def dag1() -> None:
             );
         """
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                logger.info("Table created successfully")
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+            cur.execute(sql)
+            logger.info("Table created successfully")
 
 
     @task.python(do_xcom_push=False)
@@ -232,15 +233,39 @@ def dag1() -> None:
             bucket_name=TARGET_CSV_BUCKET,
         )
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
-            with conn.cursor() as cur:
-                if file_path:
-                    sql = f"truncate table {ODS_AIRPORT_TABLE}"
-                    cur.execute(sql)
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+            if file_path:
+                sql = f"truncate table {ODS_AIRPORT_TABLE}"
+                cur.execute(sql)
 
-                    with open(file_path, "r") as file:
-                        sql_pg_copy_csv = f"copy {ODS_AIRPORT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
-                        cur.copy_expert(sql_pg_copy_csv, file)
+                with open(file_path, "r") as file:
+                    sql_pg_copy_csv = f"copy {ODS_AIRPORT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
+                    cur.copy_expert(sql_pg_copy_csv, file)
+
+
+    @task.python(do_xcom_push=False)
+    def copy_all_flight_files() -> (XComArg | None):
+        all_files = s3_hook.list_keys(
+            bucket_name=FLIGHT_SOURCE_BUCKET,
+            prefix=f"{FLIGHT_SOURCE_PATH}/"
+        )
+
+        matching_files = [
+            file for file in all_files
+            if file.startswith(f"{FLIGHT_SOURCE_PATH}/{FLIGHT_FILE_NAME_TEMPLATE}") and file.endswith('.csv')
+        ]
+
+        for source_key in matching_files:
+            file_id = source_key.split(FLIGHT_FILE_NAME_TEMPLATE)[1].replace('.csv', '')
+            destination_key = f"{ROOT_FILE_PATH}/flight_{file_id}.csv"
+
+            file_data = s3_hook.read_key(source_key, FLIGHT_SOURCE_BUCKET)
+            s3_hook.load_string(
+                string_data=file_data,
+                key=destination_key,
+                bucket_name=TARGET_CSV_BUCKET,
+                replace=True
+            )
 
 
     @task.python(do_xcom_push=False)
@@ -251,15 +276,14 @@ def dag1() -> None:
         """
         header_lines = get_lines_from_gzip(file_path, icao_code, stop_line=8)
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
-            with conn.cursor() as cur:
-                sql = get_table_ddl(header_lines)
-                logger.info(sql)
-                cur.execute(sql)
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+            sql = get_table_ddl(header_lines)
+            logger.info(sql)
+            cur.execute(sql)
 
-                sql = f"truncate table {ODS_WEATHER_TABLE}"
-                logger.info(sql)
-                cur.execute(sql)
+            sql = f"truncate table {ODS_WEATHER_TABLE}"
+            logger.info(sql)
+            cur.execute(sql)
 
     load_airport_csv_gz_to_db_tasks = []
 
@@ -289,14 +313,13 @@ def dag1() -> None:
                     tmp_path = tmp.name
 
 
-                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
-                    with conn.cursor() as cur:
-                        with open(tmp_path, 'r') as file:
-                            cur.execute("SELECT current_database(), current_schema()")
-                            db, schema = cur.fetchone()
-                            logger.info(f"Current DB: {db}, Current schema: {schema}")
-                            sql_pg_copy_csv = f"copy {ODS_WEATHER_TABLE} from stdin with csv delimiter as ',' quote '\"'"
-                            cur.copy_expert(sql_pg_copy_csv, file)
+                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+                    with open(tmp_path, 'r') as file:
+                        cur.execute("SELECT current_database(), current_schema()")
+                        db, schema = cur.fetchone()
+                        logger.info(f"Current DB: {db}, Current schema: {schema}")
+                        sql_pg_copy_csv = f"copy {ODS_WEATHER_TABLE} from stdin with csv delimiter as ',' quote '\"'"
+                        cur.copy_expert(sql_pg_copy_csv, file)
 
                         # logger.info(rows[0])
                         # for row in rows:
@@ -325,10 +348,6 @@ def dag1() -> None:
         creates stg.weather and fill it
         :return:
         """
-        postgres_hook = PostgresHook(postgres_conn_id=PG_CONN_ID)
-        conn = postgres_hook.get_conn()
-        cur = conn.cursor()
-
         sql = """
         create schema if not exists stg;
         create schema if not exists dds;
@@ -391,8 +410,10 @@ def dag1() -> None:
         ;
         """
         logger.info(sql)
-        cur.execute(sql)
-        conn.commit()
+
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+            cur.execute(sql)
+
 
 
     @task.python(do_xcom_push=False)
@@ -401,10 +422,6 @@ def dag1() -> None:
         create dds.weather and fill it - with SCD, blackjack and whores
         :return:
         """
-        postgres_hook = PostgresHook(postgres_conn_id=PG_CONN_ID)
-        conn = postgres_hook.get_conn()
-        cur = conn.cursor()
-
         sql = """
         create table if not exists dds.weather (
              airport_rk text       -- ID аэропорта Подставляется из dds_dict.airport (справочник аэропортов) по известному ICAO коду (icao_code)
@@ -417,13 +434,13 @@ def dag1() -> None:
         )
         ;
         
-        
+
         --explain analyze
         with wt_par as (
             select
-                 -- '{KFLG}' :: text[]  as airport_arr
-                 -- ,date'2024-12-01'   as from_dt
-                 -- ,date'2024-12-07'   as to_dt
+        --        '{KFLG}' :: text[]  as airport_arr
+        --        ,date'2024-12-10'   as from_dt
+        --        ,date'2024-12-15'   as to_dt
         
                  null :: text[]  as airport_arr
                 ,null :: date  as from_dt
@@ -453,6 +470,8 @@ def dag1() -> None:
                     ,coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
                     ,coalesce(stg1.temperature_celc_deegree    :: text, '')
                 )  as hash
+                
+                ,localtimestamp  as load_dt
             from
                 stg.weather  stg1
         
@@ -469,13 +488,13 @@ def dag1() -> None:
         
         ,wt_dds_table as (
             select
-                 2  as priority
-                ,airport_rk
-                ,valid_from  as dt
+                 case when b.airport_rk is not null then 0 else 2 end  as priority
+                ,a.airport_rk
+                ,a.valid_from  as dt
         
-                ,w_speed
-                ,max_gws
-                ,t_deg
+                ,a.w_speed
+                ,a.max_gws
+                ,a.t_deg
         
                 -- ,md5(  -- doesnt' work - two equal values for different rows !!!
                 --        coalesce(w_speed :: text, '')
@@ -484,12 +503,24 @@ def dag1() -> None:
                 -- )  as hash
                 ,concat_ws(
                      '::'
-                    ,coalesce(w_speed :: text, '')
-                    ,coalesce(max_gws :: text, '')
-                    ,coalesce(t_deg   :: text, '')
+                    ,coalesce(a.w_speed :: text, '')
+                    ,coalesce(a.max_gws :: text, '')
+                    ,coalesce(a.t_deg   :: text, '')
                 )  as hash
+                
+                -- if the data exists than this is the old data - don't change the load_dt
+                ,a.load_dt  as load_dt
             from
-                dds.weather
+                dds.weather  a
+                left join wt_stg_table  b
+                    on  b.airport_rk = a.airport_rk
+                    and b.dt         = a.valid_from
+                    and b.hash       = concat_ws(
+                         '::'
+                        ,coalesce(a.w_speed :: text, '')
+                        ,coalesce(a.max_gws :: text, '')
+                        ,coalesce(a.t_deg   :: text, '')
+                    )
             where 1=1
         )
         
@@ -506,7 +537,7 @@ def dag1() -> None:
             select
                 *
             from
-                wt_dds_table
+                wt_dds_table  a
             where 1=1
         )
         
@@ -520,7 +551,10 @@ def dag1() -> None:
                 ,(array_agg(max_gws order by priority))[1]  as max_gws
                 ,(array_agg(t_deg   order by priority))[1]  as t_deg
                 ,(array_agg(hash    order by priority))[1]  as hash
+                ,(array_agg(load_dt order by priority))[1]  as load_dt
+                -- ,(array_agg(load_dt order by priority))  as load_dt_arr
                 ,count(1)  as array_len
+                ,min(priority)  as highest_priority
             from
                 wt_stg_table_wo_dds
             group by
@@ -534,6 +568,7 @@ def dag1() -> None:
                 airport_rk
                 ,dt
                 ,hash
+                ,load_dt
                 ,lag(hash, 1, hash) over (partition by airport_rk order by dt)  as prev_hash
             from
                 wt_old_period_priority
@@ -578,6 +613,8 @@ def dag1() -> None:
                     order by
                         min(dt)
                 ) - interval '1 millisecond'  as valid_to
+                
+                ,max(load_dt)  as load_dt
             from
                 wt_group_key
             where 1=1
@@ -611,7 +648,7 @@ def dag1() -> None:
         
                 ,period1.valid_from
                 ,period1.valid_to
-                ,localtimestamp  as load_dt
+                ,period1.load_dt
             --    ,period1.collapsed_row_cnt
             from
                 wt_valid_period  period1
@@ -658,15 +695,15 @@ def dag1() -> None:
         
             ,valid_from
             ,valid_to
+            ,load_dt
         from
             wt_fin
         where 1=1
         ;
-
         """
         logger.info(sql)
-        cur.execute(sql)
-        conn.commit()
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+            cur.execute(sql)
 
 
     (
