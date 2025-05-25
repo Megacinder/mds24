@@ -6,6 +6,7 @@ from airflow.models.xcom_arg import XComArg
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.log.logging_mixin import LoggingMixin
+from airflow.operators.empty import EmptyOperator
 
 from datetime import datetime
 from gzip import open as gzip_open
@@ -18,25 +19,25 @@ logger = LoggingMixin().log
 ROOT_PATH = "ahremenko_ma"
 DAG_PREFIX = "ahremenko_ma"
 SOURCE_BUCKET = "db01-content"
-CSV_GZ_FILE_DICT = {
-    "KFLG": f"{ROOT_PATH}/KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
-    "KFSM": f"{ROOT_PATH}/KFSM.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
-    "KNYL": f"{ROOT_PATH}/KNYL.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
-    "KXNA": f"{ROOT_PATH}/KXNA.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
+
+CSV_GZ_FILE_LIST = {
+    "KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
+    "KFSM.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
+    "KNYL.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
+    "KXNA.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
 }
 TARGET_CSV_BUCKET = "gsbdwhdata"
 PG_CONN_ID = "con_dwh_2024_s004"
+AWS_CONN_ID = "object_storage_yc"
 PG_TARGET_TABLE = "ods.weather"
-SQL_IS_PG_TABLE_EXISTS = f"""
-select
-    exists(
-        select
-        from
-            pg_tables
-        where 1=1
-            and schemaname || '.' || tablename = '{PG_TARGET_TABLE}'
-    )
-"""
+
+
+CSV_GZ_FILE_DICT = {
+    i[:4]: f"{ROOT_PATH}/{i}"
+    for i
+    in CSV_GZ_FILE_LIST
+}
+
 
 DAG_PARAM = dict(
     dag_id=f"{DAG_PREFIX}_weather_airport",
@@ -46,8 +47,6 @@ DAG_PARAM = dict(
     description=f"{DAG_PREFIX}_weather_airport",
     tags=[f"{DAG_PREFIX}"],
 )
-
-s3_hook = S3Hook(aws_conn_id="object_storage_yc")
 
 
 def get_line_from_gzip_generator(gz_filename: str, start_line: int = 7) -> Generator[list, Any, None]:
@@ -98,11 +97,11 @@ def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, s
     return o_list
 
 
-def get_table_dml_and_rows_for_insert(lines: List[list]) -> tuple:
+def get_table_ddl(lines: List[list]) -> str:
     """
-    gives table dml and rows for insert to table in PG
+    gives table ddl
     :param lines: lines of CSV file as list of lists
-    :return: table dml and rows list
+    :return: table ddl
     """
     headers = lines[0]
     headers = ["icao_code", "local_time"] + [f"raw_{col_name.lower()}" for col_name in headers[2:]]
@@ -113,68 +112,79 @@ def get_table_dml_and_rows_for_insert(lines: List[list]) -> tuple:
             {', '.join(columns)}
         );
     """
-    lines = lines[1:]
 
-    return lines, create_table_sql
+    return create_table_sql
+
+
+s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+postgres_hook = PostgresHook(postgres_conn_id=PG_CONN_ID)
 
 
 @dag(**DAG_PARAM)
 def dag1() -> None:
     """
-    the name of tasks I tried to choose quite clear, but regarding the homework task
-    "
-        Для каждого процесса Airflow нужно написать комментарий,
-        для чего сделан поток и что он делает (без chat gpt).
-    "
-    the descriptions is there
+    the dev team 3 dag to load airports' weather data
     """
+
+    start = EmptyOperator(task_id="start")
+    stop = EmptyOperator(task_id="stop")
+
+
     @task.python(do_xcom_push=False)
-    def create_table_and_insert_rows_from_gzip() -> (XComArg | None):
-        """
-        creates a table for airport weather data and loads the data there
-        :return: nothing, but actually airflow's XComArg
-        """
-        postgres_hook = PostgresHook(postgres_conn_id=PG_CONN_ID)
+    def create_table_or_truncate() -> (XComArg | None):
         conn = postgres_hook.get_conn()
         cur = conn.cursor()
 
-        cur.execute(SQL_IS_PG_TABLE_EXISTS)
-        is_table_exists = cur.fetchone()[0]
-        logger.info("Is table exists: " + str(is_table_exists))
+        header_lines = get_lines_from_gzip(file_path, icao_code, stop_line=8)
+        create_table_sql = get_table_ddl(header_lines)
+        logger.info(create_table_sql)
+        cur.execute(create_table_sql)
 
-        if is_table_exists:
-            sql_truncate_table = f"truncate table {PG_TARGET_TABLE}"
-            logger.info(sql_truncate_table)
-            cur.execute(sql_truncate_table)
-            conn.commit()
+        sql_truncate_table = f"truncate table {PG_TARGET_TABLE}"
+        logger.info(sql_truncate_table)
+        cur.execute(sql_truncate_table)
+        conn.commit()
 
-        for icao_code, csv_gz_file in CSV_GZ_FILE_DICT.items():
-            file_path = s3_hook.download_file(
-                key=csv_gz_file,
-                bucket_name=TARGET_CSV_BUCKET,
-            )
 
-            lines = get_lines_from_gzip(file_path, icao_code)
-            rows, create_table_sql = get_table_dml_and_rows_for_insert(lines)
-            cur.execute(create_table_sql)
-            conn.commit()
+    tasks = []
 
-            logger.info("If table not exists then " + create_table_sql)
-
-            logger.info(rows[0])
-            for row in rows:
-                sql_insert_row = f"""
-                    insert into {PG_TARGET_TABLE}
-                    values (
-                        {"'" + "', '".join(row) + "'"}
-                    )
+    for icao_code, csv_gz_file in CSV_GZ_FILE_DICT.items():
+        file_path = s3_hook.download_file(
+            key=csv_gz_file,
+            bucket_name=TARGET_CSV_BUCKET,
+        )
+        def create_task(icao_code: str, file_path: str) -> (XComArg | None):
+            @task.python(do_xcom_push=False, task_id=f"load_to_db_airport_{icao_code}")
+            def insert_rows_from_gzip() -> (XComArg | None):
                 """
-                cur.execute(sql_insert_row)
-            logger.info(rows[-1])
-            conn.commit()
+                creates a table for airport weather data and loads the data there
+                :return: nothing, but actually airflow's XComArg
+                """
+                conn = postgres_hook.get_conn()
+                cur = conn.cursor()
 
 
-    create_table_and_insert_rows_from_gzip()
+                rows = get_lines_from_gzip(file_path, icao_code, start_line=7)
+
+                logger.info(rows[0])
+                for row in rows:
+                    sql_insert_row = f"""
+                        insert into {PG_TARGET_TABLE}
+                        values (
+                            {"'" + "', '".join(row) + "'"}
+                        )
+                    """
+                    cur.execute(sql_insert_row)
+                logger.info(rows[-1])
+                conn.commit()
+
+            return insert_rows_from_gzip()
+
+        task1 = create_task(icao_code, file_path)
+        tasks.append(task1)
+
+
+    start >> create_table_or_truncate() >> tasks >> stop
 
 
 dag = dag1()
@@ -193,9 +203,10 @@ if __name__ == "__main__":
     # print(next(gen))
     # print(next(gen))
     # print(next(gen))
+    print(CSV_GZ_FILE_DICT)
 
     # rows1 = get_lines_from_gzip(CSV_GZ_FILE)
-    lines1 = get_lines_from_gzip(CSV_GZ_FILE, ICAO_CODE, stop_line=9)
-    rows1, dml1 = get_table_dml_and_rows_for_insert(lines1)
-    for row1 in rows1:
-        print(row1)
+    # lines1 = get_lines_from_gzip(CSV_GZ_FILE, ICAO_CODE, stop_line=9)
+    # rows1, dml1 = get_table_dml_and_rows_for_insert(lines1)
+    # for row1 in lines1:
+    #     print(row1)

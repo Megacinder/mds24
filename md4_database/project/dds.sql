@@ -31,6 +31,7 @@ with wt_hash as (
     where 1=1
 )
 
+
 ,wt_prev_hash as (
     select
         icao_code
@@ -51,6 +52,7 @@ with wt_hash as (
         wt_prev_hash
     where 1=1
 )
+
 
 ,wt_group_key as (
     select
@@ -88,6 +90,7 @@ with wt_hash as (
         ,hash
         ,group_key
 )
+
 
 ,wt_distinct_values as (
     select distinct  -- unique hash and his values

@@ -12,11 +12,15 @@ import csv
 import logging
 
 
-IS_DOWNLOADING_NEEDED = Variable.get("ahremenko_ma_is_downloading_needed")
-if IS_DOWNLOADING_NEEDED in ('True', 'False', '1', '0'):
-    is_downloading_needed = bool(IS_DOWNLOADING_NEEDED)
-else:
+try:
+    is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed")
+    if is_downloading_needed in ('True', 'False', '1', '0'):
+        is_downloading_needed = bool(is_downloading_needed)
+    else:
+        is_downloading_needed = False
+except KeyError:
     is_downloading_needed = False
+
 
 
 class SuppressRequestsFilter(logging.Filter):
