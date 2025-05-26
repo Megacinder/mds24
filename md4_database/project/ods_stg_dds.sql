@@ -1,9 +1,46 @@
+
+create table if not exists ods.flights (
+     year                       integer
+    ,month                      integer
+    ,flight_dt                  text
+    ,carrier_code               text default ''
+    ,tail_num                   text default ''
+    ,carrier_flight_num         text default ''
+    ,origin_code                text
+    ,origin_city_name           text
+    ,dest_code                  text
+    ,dest_city_name             text
+    ,scheduled_dep_tm           text default ''
+    ,actual_dep_tm              text default ''
+    ,dep_delay_min              float default 0
+    ,dep_delay_group_num        float default 0
+    ,wheels_off_tm              text default ''
+    ,wheels_on_tm               text default ''
+    ,scheduled_arr_tm           text default ''
+    ,actual_arr_tm              text default ''
+    ,arr_delay_min              float default 0
+    ,arr_delay_group_num        float default 0
+    ,cancelled_flg              float default 0
+    ,cancellation_code          text default ''
+    ,flights_cnt                float default 0
+    ,distance                   float default 0
+    ,distance_group_num         float default 0
+    ,carrier_delay_min          float default 0
+    ,weather_delay_min          float default 0
+    ,nas_delay_min              float default 0
+    ,security_delay_min         float default 0
+    ,late_aircraft_delay_min    float default 0
+);
+
+
 create schema if not exists stg;
 create schema if not exists dds;
 
 
 create index if not exists ix_ods_airport_icao on ods.airport (icao_code);
 
+
+drop table if exists stg.weather;
 
 create table if not exists stg.weather (
      icao_code                            text
@@ -20,37 +57,90 @@ create table if not exists stg.weather (
     ,cloud_cover                          text
     ,horizontal_visibility_km             numeric
     ,dewpoint_temperature_celc_deegree    numeric
+    ,load_dt                              timestamp
 --     ,hash                                 text
 )
 ;
 
 
-truncate table stg.weather
+--truncate table stg.weather
 ;
 
+with wt_ods as (
+    select distinct
+         a.icao_code
+        ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
+        ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
+        ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
+        ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
+        ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
+        ,case when a.raw_dd     = '' then null else a.raw_dd     end               as wind_direction
+        ,case when a.raw_ff     = '' then null else a.raw_ff     end :: numeric    as wind_speed_meters_per_sec
+        ,case when a.raw_ff10   = '' then null else a.raw_ff10   end :: numeric    as max_gust_10m_meters_per_sec
+        ,case when a.raw_ww     = '' then null else a.raw_ww     end               as special_present_weather_phenomena
+        ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
+        ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
+        ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
+        ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
+        ,now()  as load_dt
+    --     ,md5(
+    --            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
+    --         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
+    --     )  as hash
+    from
+        ods.weather  a
+    where 1=1
+)
+
+
+,wt_to_delete as (
+    select
+        icao_code
+        ,min(dt)  as min_dt
+        ,max(dt)  as max_dt
+    from
+        wt_ods
+    where 1=1
+    group by
+        icao_code
+)
+
+
+,wt_delete as (
+    delete
+    from
+        stg.weather  tar1
+    using
+        wt_to_delete  sou1
+    where 1=1
+        and tar1.icao_code = sou1.icao_code
+        and tar1.dt between sou1.min_dt and sou1.max_dt
+    returning *
+)
+
+
 insert into stg.weather
-select distinct
-     a.icao_code
-    ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
-    ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
-    ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
-    ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
-    ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
-    ,case when a.raw_dd     = '' then null else a.raw_dd     end               as wind_direction
-    ,case when a.raw_ff     = '' then null else a.raw_ff     end :: numeric    as wind_speed_meters_per_sec
-    ,case when a.raw_ff10   = '' then null else a.raw_ff10   end :: numeric    as max_gust_10m_meters_per_sec
-    ,case when a.raw_ww     = '' then null else a.raw_ww     end               as special_present_weather_phenomena
-    ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
-    ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
-    ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
-    ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
---     ,md5(
---            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
---         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
---     )  as hash
+select
+     icao_code
+    ,dt
+    ,temperature_celc_deegree
+    ,pressure_station_merc_mlm
+    ,pressure_see_level_merc_mlm
+    ,humidity_prc
+    ,wind_direction
+    ,wind_speed_meters_per_sec
+    ,max_gust_10m_meters_per_sec
+    ,special_present_weather_phenomena
+    ,recent_weather_phenomena_operational
+    ,cloud_cover
+    ,horizontal_visibility_km
+    ,dewpoint_temperature_celc_deegree
+    ,load_dt
 from
-    ods.weather  a
+    wt_ods
 where 1=1
+
+
 ;
 
 

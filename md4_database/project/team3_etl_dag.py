@@ -2,6 +2,10 @@
 # aws s3 cp team3_step1_download_airport_csv.py s3://gsb2024airflow/team3_step1_download_airport_csv.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 # aws s3 cp team3_etl_dag.py s3://gsb2024airflow/team3_etl_dag.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
+class Metadata:
+    version = 5
+    type = 'full'
+
 
 from airflow.decorators import dag, task
 from airflow.models import Variable
@@ -15,7 +19,7 @@ from csv import reader as csv_reader, writer as csv_writer
 from datetime import datetime
 from gzip import open as gzip_open
 from logging import getLogger, Filter, WARNING
-from os import path, unlink
+from os import path, unlink, environ
 from tempfile import NamedTemporaryFile
 from typing import Generator, Any, List
 
@@ -54,11 +58,28 @@ WEATHER_CSV_GZ_FILE_LIST = {
     "KNYL.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
     "KXNA.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
 }
+
+FLIGHT_CSV_FILE_LIST_RAW = {
+    # "flight_2023-10.csv",
+    # "flight_2023-11.csv",
+    # "flight_2023-12.csv",
+    "flight_2024-01.csv",
+    "flight_2024-02.csv",
+    "flight_2024-03.csv",
+    # "flight_2024-04.csv",
+    # "flight_2024-05.csv",
+    # "flight_2024-06.csv",
+    # "flight_2024-07.csv",
+}
+
 WEATHER_CSV_GZ_FILE_DICT = {
     i[:4]: f"{ROOT_FILE_PATH}/{i}"
     for i
     in WEATHER_CSV_GZ_FILE_LIST
 }
+
+FLIGHT_CSV_FILE_LIST = [f"{ROOT_FILE_PATH}/{i}" for i in FLIGHT_CSV_FILE_LIST_RAW]
+
 
 DAG_PARAM = dict(
     dag_id=f"ahremenko_ma_{DAG_TAG}_etl",
@@ -71,16 +92,16 @@ DAG_PARAM = dict(
 )
 
 
-is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed", default_var=False)
-if is_downloading_needed in ('True', 'False', '1', '0'):
-    is_downloading_needed = bool(is_downloading_needed)
-else:
-    is_downloading_needed = False
-
-
 logger = LoggingMixin().log
 
-s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+
+IS_LOCAL = "AIRFLOW_HOME" not in environ and "AIRFLOW__CORE__DAGS_FOLDER" not in environ
+if not IS_LOCAL:
+    is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed", default_var=False)
+    if is_downloading_needed in ('True', '1', 'Da', 'Go', 'Huli net?'):
+        is_downloading_needed = bool(is_downloading_needed)
+    else:
+        is_downloading_needed = False
 
 
 def get_line_from_gzip_generator(gz_filename: str, start_line: int = 7) -> Generator[list, Any, None]:
@@ -131,7 +152,7 @@ def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, s
     return o_list
 
 
-def get_table_ddl(lines: List[list]) -> str:
+def get_ods_airport_table_ddl(lines: List[list]) -> str:
     """
     gives table ddl
     :param lines: lines of CSV file as list of lists
@@ -159,6 +180,7 @@ def dag1() -> None:
     stop = EmptyOperator(task_id="stop")
     csv_load = EmptyOperator(task_id="csv_load")
 
+
     @task.python(do_xcom_push=False)
     def download_airport_csv_file() -> (XComArg | None):
         """
@@ -182,6 +204,7 @@ def dag1() -> None:
             response = requests.get(AIRPORT_CSV_URL, verify=False)
             response.raise_for_status()
 
+            s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
             s3_hook.load_string(
                 string_data=response.text,
                 key=AIRPORT_CSV_PATH,
@@ -199,6 +222,7 @@ def dag1() -> None:
         creates a table for airport data from the previous task
         :return: nothing, but actually airflow's XComArg
         """
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
         file_path = s3_hook.download_file(
             key=AIRPORT_CSV_PATH,
             bucket_name=TARGET_CSV_BUCKET,
@@ -210,14 +234,20 @@ def dag1() -> None:
 
 
         columns = [f'"{header}" TEXT' for header in headers]
-        sql = f"""
+        sql_drop = f"drop table if exists {ODS_AIRPORT_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = f"""
             create table if not exists {ODS_AIRPORT_TABLE} (
                 {', '.join(columns)}
             );
         """
+        sql_truncate = f"truncate table {ODS_AIRPORT_TABLE}"
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
-            cur.execute(sql)
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
+            conn.commit()
             logger.info("Table created successfully")
 
 
@@ -227,74 +257,62 @@ def dag1() -> None:
         write the airport data to the table from the tasks
         :return: nothing, but actually airflow's XComArg
         """
-
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
         file_path = s3_hook.download_file(
             key=AIRPORT_CSV_PATH,
             bucket_name=TARGET_CSV_BUCKET,
         )
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
             if file_path:
-                sql = f"truncate table {ODS_AIRPORT_TABLE}"
-                cur.execute(sql)
-
                 with open(file_path, "r") as file:
+                    cur = conn.cursor()
                     sql_pg_copy_csv = f"copy {ODS_AIRPORT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                     cur.copy_expert(sql_pg_copy_csv, file)
+                    conn.commit()
 
 
     @task.python(do_xcom_push=False)
-    def copy_all_flight_files() -> (XComArg | None):
-        all_files = s3_hook.list_keys(
-            bucket_name=FLIGHT_SOURCE_BUCKET,
-            prefix=f"{FLIGHT_SOURCE_PATH}/"
-        )
-
-        matching_files = [
-            file for file in all_files
-            if file.startswith(f"{FLIGHT_SOURCE_PATH}/{FLIGHT_FILE_NAME_TEMPLATE}") and file.endswith('.csv')
-        ]
-
-        for source_key in matching_files:
-            file_id = source_key.split(FLIGHT_FILE_NAME_TEMPLATE)[1].replace('.csv', '')
-            destination_key = f"{ROOT_FILE_PATH}/flight_{file_id}.csv"
-
-            file_data = s3_hook.read_key(source_key, FLIGHT_SOURCE_BUCKET)
-            s3_hook.load_string(
-                string_data=file_data,
-                key=destination_key,
-                bucket_name=TARGET_CSV_BUCKET,
-                replace=True
-            )
-
-
-    @task.python(do_xcom_push=False)
-    def create_ods_weather_table_and_truncate() -> (XComArg | None):
+    def create_ods_weather_table() -> (XComArg | None):
         """
         creates ods.weather and truncate (if exists, truncate only)
         :return:
         """
-        header_lines = get_lines_from_gzip(file_path, icao_code, stop_line=8)
-
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
-            sql = get_table_ddl(header_lines)
-            logger.info(sql)
-            cur.execute(sql)
-
-            sql = f"truncate table {ODS_WEATHER_TABLE}"
-            logger.info(sql)
-            cur.execute(sql)
-
-    load_airport_csv_gz_to_db_tasks = []
-
-    for icao_code, csv_gz_file in WEATHER_CSV_GZ_FILE_DICT.items():
+        icao_code, csv_gz_file = [(k, v) for k, v in WEATHER_CSV_GZ_FILE_DICT.items()][0]
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
         file_path = s3_hook.download_file(
             key=csv_gz_file,
             bucket_name=TARGET_CSV_BUCKET,
         )
+        header_lines = get_lines_from_gzip(file_path, icao_code, stop_line=8)
+
+        sql_drop = f"drop table if exists {ODS_WEATHER_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = get_ods_airport_table_ddl(header_lines)
+        sql_truncate = f"truncate table {ODS_WEATHER_TABLE}"
+
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
+            conn.commit()
+
+
+
+    load_airport_csv_gz_to_db_tasks = []
+
+    for icao_code, csv_gz_file in WEATHER_CSV_GZ_FILE_DICT.items():
+        if IS_LOCAL:
+            return
+        else:
+            s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+            file_path = s3_hook.download_file(
+                key=csv_gz_file,
+                bucket_name=TARGET_CSV_BUCKET,
+            )
         def create_load_to_ods_airport_data_task(icao_code: str, file_path: str) -> (XComArg | None):
             """
-            wrapper to a list of parallel files' loading
+            wrapper to a list of parallel airport files' loading
             :param icao_code:
             :param file_path:
             :return:
@@ -305,6 +323,8 @@ def dag1() -> None:
                 insert weather data to a database's table in parallel - from 4 files simultaneously
                 :return: nothing, but actually airflow's XComArg
                 """
+                if IS_LOCAL: return
+
                 rows = get_lines_from_gzip(file_path, icao_code, start_line=7)
 
                 with NamedTemporaryFile(mode='w+', suffix='.csv', delete=False) as tmp:
@@ -313,13 +333,15 @@ def dag1() -> None:
                     tmp_path = tmp.name
 
 
-                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
                     with open(tmp_path, 'r') as file:
+                        cur = conn.cursor()
                         cur.execute("SELECT current_database(), current_schema()")
                         db, schema = cur.fetchone()
                         logger.info(f"Current DB: {db}, Current schema: {schema}")
                         sql_pg_copy_csv = f"copy {ODS_WEATHER_TABLE} from stdin with csv delimiter as ',' quote '\"'"
                         cur.copy_expert(sql_pg_copy_csv, file)
+                        conn.commit()
 
                         # logger.info(rows[0])
                         # for row in rows:
@@ -341,11 +363,139 @@ def dag1() -> None:
         load_airport_csv_gz_to_db_tasks.append(task1)
 
 
+    @task.python(do_xcom_push=False)
+    def copy_all_flight_files() -> (XComArg | None):
+        logger.info("is_downloading_needed, %s", is_downloading_needed)
+
+        if is_downloading_needed:
+            logger.info("Downloading flight data")
+            s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+            all_files = s3_hook.list_keys(
+                bucket_name=FLIGHT_SOURCE_BUCKET,
+                prefix=f"{FLIGHT_SOURCE_PATH}/"
+            )
+
+            matching_files = [
+                file for file in all_files
+                if file.startswith(f"{FLIGHT_SOURCE_PATH}/{FLIGHT_FILE_NAME_TEMPLATE}") and file.endswith('.csv')
+            ]
+
+            for source_key in matching_files:
+                logger.info("Downloading the file %s", source_key)
+                file_id = source_key.split(FLIGHT_FILE_NAME_TEMPLATE)[1].replace('.csv', '')
+                destination_key = f"{ROOT_FILE_PATH}/flight_{file_id}.csv"
+
+                file_data = s3_hook.read_key(source_key, FLIGHT_SOURCE_BUCKET)
+                s3_hook.load_string(
+                    string_data=file_data,
+                    key=destination_key,
+                    bucket_name=TARGET_CSV_BUCKET,
+                    replace=True
+                )
+            logger.info("Downloading flight data files completed")
+        else:
+            log_info = """
+                Downloading is not needed because the 'is_downloading_needed' variable
+                (Variable.get('ahremenko_ma_is_downloading_needed') is set to False
+            """
+            logger.info(log_info)
+
 
     @task.python(do_xcom_push=False)
-    def create_stg_weather_and_fill_it() -> (XComArg | None):
+    def create_ods_flight_table() -> (XComArg | None):
         """
-        creates stg.weather and fill it
+        creates a table for flight data
+        :return: nothing, but actually airflow's XComArg
+        """
+        sql_drop = f"drop table if exists {ODS_FLIGHT_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = f"""
+        create table if not exists {ODS_FLIGHT_TABLE} (
+             year                       integer
+            ,month                      integer
+            ,flight_dt                  text
+            ,carrier_code               text
+            ,tail_num                   text
+            ,carrier_flight_num         text
+            ,origin_code                text
+            ,origin_city_name           text
+            ,dest_code                  text
+            ,dest_city_name             text
+            ,scheduled_dep_tm           text
+            ,actual_dep_tm              text
+            ,dep_delay_min              numeric
+            ,dep_delay_group_num        numeric
+            ,wheels_off_tm              text
+            ,wheels_on_tm               text
+            ,scheduled_arr_tm           text
+            ,actual_arr_tm              text
+            ,arr_delay_min              numeric
+            ,arr_delay_group_num        numeric
+            ,cancelled_flg              numeric
+            ,cancellation_code          text
+            ,flights_cnt                numeric
+            ,distance                   numeric
+            ,distance_group_num         numeric
+            ,carrier_delay_min          numeric
+            ,weather_delay_min          numeric
+            ,nas_delay_min              numeric
+            ,security_delay_min         numeric
+            ,late_aircraft_delay_min    numeric
+        );
+        """
+        sql_truncate = f"truncate table {ODS_FLIGHT_TABLE};"
+
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
+            conn.commit()
+            logger.info("Table created successfully")
+
+
+    load_flight_csv_to_db_tasks = []
+
+    for csv_file in FLIGHT_CSV_FILE_LIST:
+        if IS_LOCAL:
+            return
+        else:
+            s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+            file_path = s3_hook.download_file(
+                key=csv_file,
+                bucket_name=TARGET_CSV_BUCKET,
+            )
+        def create_load_to_ods_flight_data_task(file_path: str) -> (XComArg | None):
+            """
+            wrapper to a list of parallel flight files' loading
+            :param file_path:
+            :return:
+            """
+            task_id_name = (
+                f"load_to_ods_flight_data_for_{csv_file.split("_")[-1].replace(".csv", "").replace("-", "")}"
+            )
+            @task.python(do_xcom_push=True, task_id=task_id_name)
+            def insert_rows_from_csv() -> (XComArg | None):
+                """
+                insert flight data to a database's table in parallel - from several files simultaneously
+                :return: nothing, but actually airflow's XComArg
+                """
+                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+                    with open(file_path, 'r') as file:
+                        cur = conn.cursor()
+                        sql_pg_copy_csv = f"copy {ODS_FLIGHT_TABLE} from stdin with csv delimiter as ',' quote '\"'"
+                        cur.copy_expert(sql_pg_copy_csv, file)
+                        conn.commit()
+
+            return insert_rows_from_csv()
+
+        task2 = create_load_to_ods_flight_data_task(file_path)
+        load_flight_csv_to_db_tasks.append(task2)
+
+
+    @task.python(do_xcom_push=False)
+    def create_stg_dds_schemas_and_stg_weather() -> (XComArg | None):
+        """
+        creates stg and dds schemas and stg.weather table
         :return:
         """
         sql = """
@@ -376,31 +526,93 @@ def dag1() -> None:
         ;
 
 
-        truncate table stg.weather
+        --truncate table stg.weather
         ;
+        """
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql)
+            logger.info("Table created successfully")
+            conn.commit()
 
+
+    @task.python(do_xcom_push=False)
+    def incremental_fill_stg_weather() -> (XComArg | None):
+        """
+        creates stg.weather and fill it
+        :return:
+        """
+        sql = """
+        with wt_ods as (
+            select distinct
+                 a.icao_code
+                ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
+                ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
+                ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
+                ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
+                ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
+                ,case when a.raw_dd     = '' then null else a.raw_dd     end               as wind_direction
+                ,case when a.raw_ff     = '' then null else a.raw_ff     end :: numeric    as wind_speed_meters_per_sec
+                ,case when a.raw_ff10   = '' then null else a.raw_ff10   end :: numeric    as max_gust_10m_meters_per_sec
+                ,case when a.raw_ww     = '' then null else a.raw_ww     end               as special_present_weather_phenomena
+                ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
+                ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
+                ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
+                ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
+            --     ,md5(
+            --            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
+            --         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
+            --     )  as hash
+            from
+                ods.weather  a
+            where 1=1
+        )
+        
+        
+        ,wt_to_delete as (
+            select
+                icao_code
+                ,min(dt)  as min_dt
+                ,max(dt)  as max_dt
+            from
+                wt_ods
+            where 1=1
+            group by
+                icao_code
+        )
+        
+        
+        ,wt_delete as (
+            delete
+            from
+                stg.weather  tar1
+            using
+                wt_to_delete  sou1
+            where 1=1
+                and tar1.icao_code = sou1.icao_code
+                and tar1.dt between sou1.min_dt and sou1.max_dt
+            returning *
+        )
+        
+        
         insert into stg.weather
-        select distinct
-             a.icao_code
-            ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
-            ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
-            ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
-            ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
-            ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
-            ,case when a.raw_dd     = '' then null else a.raw_dd     end               as wind_direction
-            ,case when a.raw_ff     = '' then null else a.raw_ff     end :: numeric    as wind_speed_meters_per_sec
-            ,case when a.raw_ff10   = '' then null else a.raw_ff10   end :: numeric    as max_gust_10m_meters_per_sec
-            ,case when a.raw_ww     = '' then null else a.raw_ww     end               as special_present_weather_phenomena
-            ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
-            ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
-            ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
-            ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
-        --     ,md5(
-        --            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
-        --         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
-        --     )  as hash
+        select
+             icao_code
+            ,dt
+            ,temperature_celc_deegree
+            ,pressure_station_merc_mlm
+            ,pressure_see_level_merc_mlm
+            ,humidity_prc
+            ,wind_direction
+            ,wind_speed_meters_per_sec
+            ,max_gust_10m_meters_per_sec
+            ,special_present_weather_phenomena
+            ,recent_weather_phenomena_operational
+            ,cloud_cover
+            ,horizontal_visibility_km
+            ,dewpoint_temperature_celc_deegree
         from
-            ods.weather  a
+            wt_ods
         where 1=1
         ;
         
@@ -411,8 +623,10 @@ def dag1() -> None:
         """
         logger.info(sql)
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
             cur.execute(sql)
+            conn.commit()
 
 
 
@@ -433,7 +647,7 @@ def dag1() -> None:
             ,load_dt    timestamp  -- Время загрузки Время data interval end
         )
         ;
-        
+
 
         --explain analyze
         with wt_par as (
@@ -446,8 +660,8 @@ def dag1() -> None:
                 ,null :: date  as from_dt
                 ,null :: date  as to_dt
         )
-        
-        
+
+
         ,wt_stg_table as (
             select
                  1  as priority
@@ -470,11 +684,11 @@ def dag1() -> None:
                     ,coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
                     ,coalesce(stg1.temperature_celc_deegree    :: text, '')
                 )  as hash
-                
+
                 ,localtimestamp  as load_dt
             from
                 stg.weather  stg1
-        
+
                 join wt_par  pa1
                     on  (pa1.airport_arr is null or stg1.icao_code = any(pa1.airport_arr))
                     and (pa1.from_dt     is null or stg1.dt       >= pa1.from_dt         )
@@ -702,8 +916,10 @@ def dag1() -> None:
         ;
         """
         logger.info(sql)
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn().cursor() as cur:
+        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+            cur = conn.cursor()
             cur.execute(sql)
+            conn.commit()
 
 
     (
@@ -716,14 +932,23 @@ def dag1() -> None:
 
     (
         start
-        >> create_ods_weather_table_and_truncate()
+        >> create_ods_weather_table()
         >> load_airport_csv_gz_to_db_tasks
         >> csv_load
     )
 
     (
+        start
+        >> copy_all_flight_files()
+        >> create_ods_flight_table()
+        >> load_flight_csv_to_db_tasks
+        >> csv_load
+    )
+
+    (
         csv_load
-        >> create_stg_weather_and_fill_it()
+        >> create_stg_dds_schemas_and_stg_weather()
+        >> incremental_fill_stg_weather()
         >> create_dds_weather_and_fill_it_as_an_scd()
         >> stop
     )
