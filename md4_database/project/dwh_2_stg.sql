@@ -1,51 +1,13 @@
-
-create table if not exists ods.flights (
-     year                       integer
-    ,month                      integer
-    ,flight_dt                  text
-    ,carrier_code               text default ''
-    ,tail_num                   text default ''
-    ,carrier_flight_num         text default ''
-    ,origin_code                text
-    ,origin_city_name           text
-    ,dest_code                  text
-    ,dest_city_name             text
-    ,scheduled_dep_tm           text default ''
-    ,actual_dep_tm              text default ''
-    ,dep_delay_min              float default 0
-    ,dep_delay_group_num        float default 0
-    ,wheels_off_tm              text default ''
-    ,wheels_on_tm               text default ''
-    ,scheduled_arr_tm           text default ''
-    ,actual_arr_tm              text default ''
-    ,arr_delay_min              float default 0
-    ,arr_delay_group_num        float default 0
-    ,cancelled_flg              float default 0
-    ,cancellation_code          text default ''
-    ,flights_cnt                float default 0
-    ,distance                   float default 0
-    ,distance_group_num         float default 0
-    ,carrier_delay_min          float default 0
-    ,weather_delay_min          float default 0
-    ,nas_delay_min              float default 0
-    ,security_delay_min         float default 0
-    ,late_aircraft_delay_min    float default 0
-);
+create schema if not exists stg
+;
 
 
-create schema if not exists stg;
-create schema if not exists dds;
-
-
-create index if not exists ix_ods_airport_icao on ods.airport (icao_code);
-
-
-drop table if exists stg.weather;
-
+--drop table if exists stg.weather
+--;
 create table if not exists stg.weather (
      icao_code                            text
     ,dt                                   timestamp
-    ,temperature_celc_deegree             numeric
+    ,temperature_cels_degree              numeric
     ,pressure_station_merc_mlm            numeric
     ,pressure_see_level_merc_mlm          numeric
     ,humidity_prc                         numeric
@@ -56,21 +18,52 @@ create table if not exists stg.weather (
     ,recent_weather_phenomena_operational text
     ,cloud_cover                          text
     ,horizontal_visibility_km             numeric
-    ,dewpoint_temperature_celc_deegree    numeric
+    ,dewpoint_temperature_cels_deegree    numeric
     ,load_dt                              timestamp
 --     ,hash                                 text
 )
 ;
 
 
---truncate table stg.weather
+create table if not exists stg.flight (
+     year                       int
+    ,month                      int
+    ,dt                         date
+    ,carrier_code               text
+    ,tail_num                   text
+    ,carrier_flight_num         text
+    ,origin_airport_iata_code   text
+    ,origin_city_name           text
+    ,dest_airport_iata_code     text
+    ,dest_city_name             text
+    ,scheduled_dep_tm           text
+    ,actual_dep_tm              text
+    ,dep_delay_min              int
+    ,dep_delay_group_num        numeric
+    ,wheels_off_tm              text
+    ,wheels_on_tm               text
+    ,scheduled_arr_tm           text
+    ,actual_arr_tm              text
+    ,arr_delay_min              int
+    ,arr_delay_group_num        numeric
+    ,cancelled_flg              smallint
+    ,cancellation_code          text
+    ,flights_cnt                int
+    ,distance                   numeric
+    ,distance_group_num         numeric
+    ,carrier_delay_min          int
+    ,weather_delay_min          int
+    ,nas_delay_min              int
+    ,security_delay_min         int
+    ,late_aircraft_delay_min    int
+)
 ;
 
 with wt_ods as (
     select distinct
          a.icao_code
         ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
-        ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
+        ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_cels_deegree
         ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
         ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
         ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
@@ -81,8 +74,8 @@ with wt_ods as (
         ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
         ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
         ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
-        ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
-        ,now()  as load_dt
+        ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_cels_deegree
+        ,localtimestamp  as load_dt
     --     ,md5(
     --            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
     --         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
@@ -91,7 +84,6 @@ with wt_ods as (
         ods.weather  a
     where 1=1
 )
-
 
 ,wt_to_delete as (
     select
@@ -105,7 +97,6 @@ with wt_ods as (
         icao_code
 )
 
-
 ,wt_delete as (
     delete
     from
@@ -118,12 +109,11 @@ with wt_ods as (
     returning *
 )
 
-
 insert into stg.weather
 select
      icao_code
     ,dt
-    ,temperature_celc_deegree
+    ,temperature_cels_deegree
     ,pressure_station_merc_mlm
     ,pressure_see_level_merc_mlm
     ,humidity_prc
@@ -134,15 +124,12 @@ select
     ,recent_weather_phenomena_operational
     ,cloud_cover
     ,horizontal_visibility_km
-    ,dewpoint_temperature_celc_deegree
+    ,dewpoint_temperature_cels_deegree
     ,load_dt
 from
     wt_ods
 where 1=1
-
-
 ;
-
 
 create index if not exists ix_stg_weather_icao_dt on stg.weather (icao_code, dt)
 --create index ix_stg_weather_icao_dt_hash on stg.weather (icao_code, dt, hash)
@@ -428,4 +415,94 @@ where 1=1
 ;
 
 --truncate table dds.weather
+
+
+
+
+
+--dds.flight_successful
+with wt_par as (
+    select
+        --array[0, 1, 2, 3] :: int[]  as cancel_flg
+        array[0] :: int[]  as cancel_flg
+)
+
+,wt_flight as (
+    select
+        carrier_flight_num
+        ,carrier_code || '.' || tail_num || '.' || carrier_flight_num  as flight_rk
+        ,to_date(flight_dt, 'mm/dd/yyyy hh:mi:ss') :: date  as dt
+
+        ,orig_airport1.id  as origin_airport_dk
+        ,dest_airport1.id  as dest_airport_dk
+
+        ,carrier_code
+        ,tail_num
+        ,distance
+        ,dep_delay_min
+        --,carrier_delay_min
+        --,weather_delay_min
+        --,nas_delay_min
+        --,security_delay_min
+        --,late_aircraft_delay_min
+        ,coalesce(cancelled_flg, 0)  as cancel_flg
+
+        ,concat_ws(
+            ', '
+            ,case when coalesce(carrier_delay_min      , 0) > 0 then 'вина перевозчика' else null end
+            ,case when coalesce(weather_delay_min      , 0) > 0 then 'погода' else null end
+            ,case when coalesce(nas_delay_min          , 0) > 0 then 'NAS (National aviation services)' else null end
+            ,case when coalesce(security_delay_min     , 0) > 0 then 'проверка безопасности' else null end
+            ,case when coalesce(late_aircraft_delay_min, 0) > 0 then 'позднее прибытие самолета' else null end
+        )  as delay_reason
+        ,now()  as load_dt
+    from
+        ods.flights  flight1
+        join wt_par  pa1
+            on coalesce(flight1.cancelled_flg, 0) = any(cancel_flg)
+        join ods.airport  orig_airport1
+            on orig_airport1.iata_code = flight1.origin_code
+        join ods.airport  dest_airport1
+            on dest_airport1.iata_code = flight1.dest_code
+    where 1=1
+        --and carrier_code || '.' || tail_num || '.' || carrier_flight_num = '9E.N311PQ.4930'
+)
+
+,wt_fin as (
+    select
+        carrier_flight_num
+        ,flight_rk
+        ,dt
+
+        ,origin_airport_dk
+        ,dest_airport_dk
+
+        ,carrier_code
+        ,tail_num
+        ,distance
+        ,dep_delay_min
+        ,cancel_flg
+
+        --,delay_reason  as delay_reason_orig
+
+        ,case
+            when dep_delay_min > 0 and delay_reason != ''
+                then
+                    delay_reason
+            when dep_delay_min > 0 and delay_reason = ''
+                then
+                    'неизвестно'
+            else
+                null
+        end  as delay_reason
+        ,now()  as load_dt
+    from
+        wt_flight
+)
+
+select
+    count(1)
+from
+    wt_fin
+where 1=1
 

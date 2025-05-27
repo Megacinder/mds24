@@ -3,13 +3,14 @@
 # aws s3 cp team3_etl_dag.py s3://gsb2024airflow/team3_etl_dag.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
 class Metadata:
-    version = 5
+    version = 7
     type = 'full'
 
 
 from airflow.decorators import dag, task
 from airflow.models import Variable
 from airflow.models.xcom_arg import XComArg
+from airflow.models.baseoperator import chain
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -17,6 +18,7 @@ from airflow.utils.log.logging_mixin import LoggingMixin
 
 from csv import reader as csv_reader, writer as csv_writer
 from datetime import datetime
+from functools import reduce
 from gzip import open as gzip_open
 from logging import getLogger, Filter, WARNING
 from os import path, unlink, environ
@@ -32,25 +34,16 @@ class SuppressRequestsFilter(Filter):
         return not record.name.startswith("urllib3")
 
 
-ROOT_FILE_PATH = "ahremenko_ma"
-DAG_TAG = "team_3"
+ETL_PARAM = dict(
+    root_file_path="ahremenko_ma",  # airport and flight data in my - ahremenko_ma - path only
+    dag_id="ahremenko_ma_team_3_etl_dag",
+    dag_tag="team_3",
+    pg_conn_id="con_dwh_2024_s004",
+    pg_db_name="dwh_2024_s004",
+)
 
-AIRPORT_CSV_URL = "https://ourairports.com/data/airports.csv"
-AIRPORT_CSV_PATH = f"{ROOT_FILE_PATH}/airports.csv"
-TARGET_CSV_BUCKET = "gsbdwhdata"
-
-
-FLIGHT_SOURCE_BUCKET = "db01-content"
-FLIGHT_SOURCE_PATH = "flights"
-FLIGHT_FILE_NAME_TEMPLATE = "T_ONTIME_REPORTING-"
-
-AWS_CONN_ID = "object_storage_yc"
-PG_CONN_ID = "con_dwh_2024_s004"
-PG_DB_NAME = "dwh_2024_s004"
-
-ODS_WEATHER_TABLE = "ods.weather"
-ODS_AIRPORT_TABLE = "ods.airport"
-ODS_FLIGHT_TABLE = "ods.flight"
+AIRPORT_CSV_PATH = f"{ETL_PARAM["root_file_path"]}/airports.csv"
+AIRPORT_TZ_CSV_PATH = f"{ETL_PARAM["root_file_path"]}/airport_tz.csv"
 
 WEATHER_CSV_GZ_FILE_LIST = {
     "KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
@@ -58,7 +51,6 @@ WEATHER_CSV_GZ_FILE_LIST = {
     "KNYL.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
     "KXNA.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
 }
-
 FLIGHT_CSV_FILE_LIST_RAW = {
     # "flight_2023-10.csv",
     # "flight_2023-11.csv",
@@ -71,23 +63,36 @@ FLIGHT_CSV_FILE_LIST_RAW = {
     # "flight_2024-06.csv",
     # "flight_2024-07.csv",
 }
-
 WEATHER_CSV_GZ_FILE_DICT = {
-    i[:4]: f"{ROOT_FILE_PATH}/{i}"
+    i[:4]: f"{ETL_PARAM["root_file_path"]}/{i}"
     for i
     in WEATHER_CSV_GZ_FILE_LIST
 }
+FLIGHT_CSV_FILE_LIST = [f"{ETL_PARAM["root_file_path"]}/{i}" for i in FLIGHT_CSV_FILE_LIST_RAW]
 
-FLIGHT_CSV_FILE_LIST = [f"{ROOT_FILE_PATH}/{i}" for i in FLIGHT_CSV_FILE_LIST_RAW]
+
+
+
+TARGET_CSV_BUCKET = "gsbdwhdata"
+AIRPORT_CSV_URL = "https://ourairports.com/data/airports.csv"
+FLIGHT_SOURCE_BUCKET = "db01-content"
+FLIGHT_SOURCE_PATH = "flights"
+FLIGHT_FILE_NAME_TEMPLATE = "T_ONTIME_REPORTING-"
+AWS_CONN_ID = "object_storage_yc"
+
+ODS_WEATHER_TABLE = "ods.weather"
+ODS_AIRPORT_TABLE = "ods.airport"
+ODS_AIRPORT_TZ_TABLE = "ods.airport_tz"
+ODS_FLIGHT_TABLE = "ods.flight"
 
 
 DAG_PARAM = dict(
-    dag_id=f"ahremenko_ma_{DAG_TAG}_etl",
+    dag_id=f"{ETL_PARAM["dag_id"]}",
     schedule=None,
     start_date=datetime(2025, 5, 1),
     catchup=False,
-    description=f"{DAG_TAG}_etl_dag",
-    tags=[f"{DAG_TAG}"],
+    description=f"supadupadag",
+    tags=[f"{ETL_PARAM["dag_tag"]}"],
     max_active_tasks=5,
 )
 
@@ -178,7 +183,8 @@ def dag1() -> None:
     """
     start = EmptyOperator(task_id="start")
     stop = EmptyOperator(task_id="stop")
-    csv_load = EmptyOperator(task_id="csv_load")
+    start_csv_load = EmptyOperator(task_id="start_csv_load")
+    stop_csv_load = EmptyOperator(task_id="stop_csv_load")
 
 
     @task.python(do_xcom_push=False)
@@ -242,7 +248,7 @@ def dag1() -> None:
         """
         sql_truncate = f"truncate table {ODS_AIRPORT_TABLE}"
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql_drop)
             cur.execute(sql_create)
@@ -257,17 +263,46 @@ def dag1() -> None:
         write the airport data to the table from the tasks
         :return: nothing, but actually airflow's XComArg
         """
+        logger_task = getLogger("airflow.task")
+        logger_task.setLevel(WARNING)
+        logger_task.addFilter(SuppressRequestsFilter())
+
         s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
         file_path = s3_hook.download_file(
             key=AIRPORT_CSV_PATH,
             bucket_name=TARGET_CSV_BUCKET,
         )
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             if file_path:
                 with open(file_path, "r") as file:
                     cur = conn.cursor()
                     sql_pg_copy_csv = f"copy {ODS_AIRPORT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
+                    cur.copy_expert(sql_pg_copy_csv, file)
+                    conn.commit()
+
+
+    @task.python(do_xcom_push=False)
+    def write_airport_tz_csv_to_ods_airport() -> (XComArg | None):
+        """
+        write the airport data to the table from the tasks
+        :return: nothing, but actually airflow's XComArg
+        """
+        logger_task = getLogger("airflow.task")
+        logger_task.setLevel(WARNING)
+        logger_task.addFilter(SuppressRequestsFilter())
+
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+        file_path = s3_hook.download_file(
+            key=AIRPORT_TZ_CSV_PATH,
+            bucket_name=TARGET_CSV_BUCKET,
+        )
+
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
+            if file_path:
+                with open(file_path, "r") as file:
+                    cur = conn.cursor()
+                    sql_pg_copy_csv = f"copy {ODS_AIRPORT_TZ_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                     cur.copy_expert(sql_pg_copy_csv, file)
                     conn.commit()
 
@@ -290,7 +325,7 @@ def dag1() -> None:
         sql_create = get_ods_airport_table_ddl(header_lines)
         sql_truncate = f"truncate table {ODS_WEATHER_TABLE}"
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql_drop)
             cur.execute(sql_create)
@@ -299,7 +334,7 @@ def dag1() -> None:
 
 
 
-    load_airport_csv_gz_to_db_tasks = []
+    load_weather_csv_gz_to_db_tasks = []
 
     for icao_code, csv_gz_file in WEATHER_CSV_GZ_FILE_DICT.items():
         if IS_LOCAL:
@@ -310,20 +345,24 @@ def dag1() -> None:
                 key=csv_gz_file,
                 bucket_name=TARGET_CSV_BUCKET,
             )
-        def create_load_to_ods_airport_data_task(icao_code: str, file_path: str) -> (XComArg | None):
+        def create_load_to_ods_weather_data_task(icao_code: str, file_path: str) -> (XComArg | None):
             """
             wrapper to a list of parallel airport files' loading
             :param icao_code:
             :param file_path:
             :return:
             """
-            @task.python(do_xcom_push=True, task_id=f"load_to_ods_airport_data_for_{icao_code}")
+            @task.python(do_xcom_push=True, task_id=f"load_to_ods_weather_data_for_{icao_code}")
             def insert_rows_from_gzip() -> (XComArg | None):
                 """
                 insert weather data to a database's table in parallel - from 4 files simultaneously
                 :return: nothing, but actually airflow's XComArg
                 """
                 if IS_LOCAL: return
+
+                logger_task = getLogger("airflow.task")
+                logger_task.setLevel(WARNING)
+                logger_task.addFilter(SuppressRequestsFilter())
 
                 rows = get_lines_from_gzip(file_path, icao_code, start_line=7)
 
@@ -333,7 +372,7 @@ def dag1() -> None:
                     tmp_path = tmp.name
 
 
-                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+                with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
                     with open(tmp_path, 'r') as file:
                         cur = conn.cursor()
                         cur.execute("SELECT current_database(), current_schema()")
@@ -357,14 +396,19 @@ def dag1() -> None:
                 if tmp_path and path.exists(tmp_path):
                     unlink(tmp_path)
 
+
             return insert_rows_from_gzip()
 
-        task1 = create_load_to_ods_airport_data_task(icao_code, file_path)
-        load_airport_csv_gz_to_db_tasks.append(task1)
+        task1 = create_load_to_ods_weather_data_task(icao_code, file_path)
+        load_weather_csv_gz_to_db_tasks.append(task1)
 
 
     @task.python(do_xcom_push=False)
     def copy_all_flight_files() -> (XComArg | None):
+        logger_task = getLogger("airflow.task")
+        logger_task.setLevel(WARNING)
+        logger_task.addFilter(SuppressRequestsFilter())
+
         logger.info("is_downloading_needed, %s", is_downloading_needed)
 
         if is_downloading_needed:
@@ -383,7 +427,7 @@ def dag1() -> None:
             for source_key in matching_files:
                 logger.info("Downloading the file %s", source_key)
                 file_id = source_key.split(FLIGHT_FILE_NAME_TEMPLATE)[1].replace('.csv', '')
-                destination_key = f"{ROOT_FILE_PATH}/flight_{file_id}.csv"
+                destination_key = f"{ETL_PARAM["root_file_path"]}/flight_{file_id}.csv"
 
                 file_data = s3_hook.read_key(source_key, FLIGHT_SOURCE_BUCKET)
                 s3_hook.load_string(
@@ -444,7 +488,7 @@ def dag1() -> None:
         """
         sql_truncate = f"truncate table {ODS_FLIGHT_TABLE};"
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql_drop)
             cur.execute(sql_create)
@@ -479,12 +523,17 @@ def dag1() -> None:
                 insert flight data to a database's table in parallel - from several files simultaneously
                 :return: nothing, but actually airflow's XComArg
                 """
-                with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+                logger_task = getLogger("airflow.task")
+                logger_task.setLevel(WARNING)
+                logger_task.addFilter(SuppressRequestsFilter())
+
+                with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
                     with open(file_path, 'r') as file:
                         cur = conn.cursor()
-                        sql_pg_copy_csv = f"copy {ODS_FLIGHT_TABLE} from stdin with csv delimiter as ',' quote '\"'"
+                        sql_pg_copy_csv = f"copy {ODS_FLIGHT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                         cur.copy_expert(sql_pg_copy_csv, file)
                         conn.commit()
+
 
             return insert_rows_from_csv()
 
@@ -529,7 +578,7 @@ def dag1() -> None:
         --truncate table stg.weather
         ;
         """
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql)
             logger.info("Table created successfully")
@@ -623,7 +672,7 @@ def dag1() -> None:
         """
         logger.info(sql)
 
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql)
             conn.commit()
@@ -916,37 +965,65 @@ def dag1() -> None:
         ;
         """
         logger.info(sql)
-        with PostgresHook(postgres_conn_id=PG_CONN_ID).get_conn() as conn:
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql)
             conn.commit()
 
 
+    # (
+    #     start
+    #     >> download_airport_csv_file()
+    #     >> create_ods_airport_table()
+    #     >> write_airport_csv_to_ods_airport()
+    #     >> csv_load
+    # )
+    #
+    # (
+    #     start
+    #     >> reduce(lambda x, y: x >> y, load_weather_csv_gz_to_db_tasks)
+    #     >> create_ods_weather_table()
+    #     >> load_weather_csv_gz_to_db_tasks
+    #     >> csv_load
+    # )
+    #
+    # (
+    #     start
+    #     >> copy_all_flight_files()
+    #     >> reduce(lambda x, y: x >> y, load_flight_csv_to_db_tasks)
+    #     >> create_ods_flight_table()
+    #     >> load_flight_csv_to_db_tasks
+    #     >> csv_load
+    # )
+    #
+    # (
+    #     csv_load
+    #     >> create_stg_dds_schemas_and_stg_weather()
+    #     >> incremental_fill_stg_weather()
+    #     >> create_dds_weather_and_fill_it_as_an_scd()
+    #     >> stop
+    # )
+
     (
         start
         >> download_airport_csv_file()
-        >> create_ods_airport_table()
-        >> write_airport_csv_to_ods_airport()
-        >> csv_load
-    )
-
-    (
-        start
-        >> create_ods_weather_table()
-        >> load_airport_csv_gz_to_db_tasks
-        >> csv_load
-    )
-
-    (
-        start
         >> copy_all_flight_files()
-        >> create_ods_flight_table()
-        >> load_flight_csv_to_db_tasks
-        >> csv_load
+        >> [
+            create_ods_airport_table(),
+            create_ods_weather_table(),
+            create_ods_flight_table(),
+        ]
+        >> start_csv_load
+        >> write_airport_csv_to_ods_airport()
+        >> stop_csv_load
     )
 
     (
-        csv_load
+        [
+            reduce(lambda x, y: x >> y, [start_csv_load] + load_weather_csv_gz_to_db_tasks),
+            reduce(lambda x, y: x >> y, [start_csv_load] + load_flight_csv_to_db_tasks),
+        ]
+        >> stop_csv_load
         >> create_stg_dds_schemas_and_stg_weather()
         >> incremental_fill_stg_weather()
         >> create_dds_weather_and_fill_it_as_an_scd()
