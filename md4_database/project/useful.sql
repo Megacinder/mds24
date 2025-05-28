@@ -81,3 +81,246 @@ create table dds.weather (
     ,valid_to   timestamp  -- Окончание периода Следующее известное время сбора данных для этого аэропорта или дата в будущем 5999-01-01
     ,load_dt    timestamp  -- Время загрузки Время data interval end
 )
+
+
+
+
+
+
+/*
+select
+    string_agg(column_name, ' || ' order by ordinal_position)  as col_list
+from
+    information_schema.columns
+where 1=1
+    and table_name = 'weather'
+    and column_name != 'local_time'
+*/
+
+
+with wt_par as (
+    select
+        '{KFLG}' :: text[]  as airport_arr
+        ,date'2024-12-01'   as from_dt
+        ,date'2024-12-11'   as to_dt
+
+--         null :: text[]  as airport_arr
+--        ,null :: date  as from_dt
+--        ,null :: date  as to_dt
+)
+
+
+,wt_norm_col_name_w_hash as (
+    select
+         a.icao_code
+        ,dt
+        ,temperature_celc_deegree
+        ,pressure_station_merc_mlm
+        ,pressure_see_level_merc_mlm
+        ,humidity_prc
+        ,wind_direction
+        ,wind_speed_meters_per_sec
+        ,max_gust_10m_meters_per_sec
+        ,special_present_weather_phenomena
+        ,recent_weather_phenomena_operational
+        ,cloud_cover
+        ,horizontal_visibility_km
+        ,dewpoint_temperature_celc_deegree
+        ,hash
+    from
+        stg.weather  a
+        cross join wt_par  pa1
+    where 1=1
+        and (pa1.airport_arr is null or a.icao_code = any(pa1.airport_arr))
+        and (pa1.from_dt     is null or a.dt       >= pa1.from_dt         )
+        and (pa1.to_dt       is null or a.dt       <= pa1.to_dt + 1       )
+
+)
+
+
+,wt_prev_hash as (
+    select
+        icao_code
+        ,dt
+        ,hash
+        ,lag(hash, 1, hash) over (partition by icao_code order by dt)  as prev_hash
+    from
+        wt_norm_col_name_w_hash
+    where 1=1
+)
+
+--select count(1) from wt_prev_hash
+
+,wt_change_flg as (
+    select
+        *
+        ,case when hash != prev_hash then 1 else 0 end  as change_flg
+    from
+        wt_prev_hash
+    where 1=1
+)
+
+
+,wt_group_key as (
+    select
+        *
+        ,sum(change_flg) over (partition by icao_code order by dt, hash)  as group_key
+    from
+        wt_change_flg
+    where 1=1
+)
+
+--select count(1) from wt_group_key
+
+,wt_valid_period as (
+    select
+        icao_code
+        ,hash
+        ,min(dt)  as valid_from
+        ,lead(
+            min(dt)
+            ,1
+            ,'6000-01-01' :: timestamp
+        ) over (
+            partition by
+                icao_code
+            order by
+                min(dt)
+        ) - interval '1 millisecond'  as valid_to
+    from
+        wt_group_key
+    where 1=1
+        --and group_key = '7050'
+    group by
+        icao_code
+        ,hash
+        ,group_key
+)
+
+--select count(1) from wt_valid_period
+
+,wt_distinct_values as (
+    select distinct  -- unique hash and his values
+        hash
+        ,icao_code
+        ,temperature_celc_deegree
+        ,pressure_station_merc_mlm
+        ,pressure_see_level_merc_mlm
+        ,humidity_prc
+        ,wind_direction
+        ,wind_speed_meters_per_sec
+        ,max_gust_10m_meters_per_sec
+        ,special_present_weather_phenomena
+        ,recent_weather_phenomena_operational
+        ,cloud_cover
+        ,horizontal_visibility_km
+        ,dewpoint_temperature_celc_deegree
+    from
+        wt_norm_col_name_w_hash
+    where 1=1
+)
+
+--select count(1) from wt_distinct_values
+
+--insert into dds.weather
+,wt_fin as (
+    select
+         airport1.id :: text || '.' || period1.icao_code  as airport_rk
+
+        ,values1.wind_speed_meters_per_sec  as w_speed
+        ,values1.max_gust_10m_meters_per_sec  as max_gws
+        ,values1.temperature_celc_deegree  as t_deg
+
+        ,period1.valid_from
+        ,period1.valid_to
+        ,localtimestamp  as load_dt
+    from
+        wt_valid_period  period1
+
+        join wt_distinct_values  values1
+            on  values1.icao_code = period1.icao_code
+            and values1.hash      = period1.hash
+
+        join ods.airport  airport1
+            on airport1.icao_code = period1.icao_code
+    where 1=1
+)
+
+--insert into dds.weather
+select
+    stg1.*
+from
+    wt_fin  stg1
+    left join dds.weather  dds1
+        on  dds1.airport_rk = stg1.airport_rk
+        and dds1.valid_from = stg1.valid_from
+        and dds1.valid_to   = stg1.valid_to
+where 1=1
+    and dds1.airport_rk is null
+--select * from dds.weather
+
+
+--select group_key, count(1) from wt_group_key
+--group by group_key having count(1) > 1 order by count(1) desc
+
+
+--select
+--    icao_code
+--    ,hash
+--    ,min(dt)  as valid_from
+--    ,max(dt)  as valid_to
+--from
+--    wt_group_key
+--group by
+--    icao_code
+--    ,hash
+--    ,group_key
+--order by
+--    icao_code
+--    ,min(dt)
+
+
+
+
+
+--,wt_sou as (
+--select * from wt_hash
+----where hash in (select hash from wt_change_flg where change_flg = 1)
+--where hash = '7864174591dc73a8ee6ca24502764bf4'
+--)
+--
+--select * from wt_a
+--select
+--    hash_key
+--    ,count(1)
+--from
+--    wt_hash
+--group by
+--    hash_key
+--having 1=1
+--    and count(1) > 1
+
+--select
+--    string_agg(column_name, ', ' order by ordinal_position)  as col_list
+--from
+--    information_schema.columns
+--where table_name = 'weather'
+
+
+
+
+select
+    flight_dt
+    ,tail_num
+    ,carrier_flight_num
+    ,actual_dep_tm
+    ,count(1)
+from
+    ods.flight
+where 1=1
+group by
+    flight_dt
+    ,tail_num
+    ,carrier_flight_num
+    ,actual_dep_tm
+having count(1) > 1

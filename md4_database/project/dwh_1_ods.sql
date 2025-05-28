@@ -67,6 +67,18 @@ create table if not exists ods.airport (
 --;
 
 
+drop table if exists ods.airport_tz
+;
+create table if not exists ods.airport_tz (
+    iata_code text
+    ,tz       text
+)
+;
+
+
+
+
+
 drop table if exists ods.weather
 ;
 create table ods.weather (

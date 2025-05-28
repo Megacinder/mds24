@@ -223,117 +223,38 @@ def dag1() -> None:
 
 
     @task.python(do_xcom_push=False)
-    def create_ods_tables() -> (XComArg | None):
+    def create_ods_airport_table() -> (XComArg | None):
         """
         creates a table for airport data from the previous task
         :return: nothing, but actually airflow's XComArg
         """
-        sql = """
-        create schema if not exists ods
-        ;
-        
-        
-        drop table if exists ods.flight
-        ;
-        create table if not exists ods.flight (
-             year                       text
-            ,month                      text
-            ,flight_dt                  text
-            ,carrier_code               text
-            ,tail_num                   text
-            ,carrier_flight_num         text
-            ,origin_code                text
-            ,origin_city_name           text
-            ,dest_code                  text
-            ,dest_city_name             text
-            ,scheduled_dep_tm           text
-            ,actual_dep_tm              text
-            ,dep_delay_min              text
-            ,dep_delay_group_num        text
-            ,wheels_off_tm              text
-            ,wheels_on_tm               text
-            ,scheduled_arr_tm           text
-            ,actual_arr_tm              text
-            ,arr_delay_min              text
-            ,arr_delay_group_num        text
-            ,cancelled_flg              text
-            ,cancellation_code          text
-            ,flights_cnt                text
-            ,distance                   text
-            ,distance_group_num         text
-            ,carrier_delay_min          text
-            ,weather_delay_min          text
-            ,nas_delay_min              text
-            ,security_delay_min         text
-            ,late_aircraft_delay_min    text
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+        file_path = s3_hook.download_file(
+            key=AIRPORT_CSV_PATH,
+            bucket_name=TARGET_CSV_BUCKET,
         )
-        ;
-        
-        
-        drop table if exists ods.airport
-        ;
-        create table if not exists ods.airport (
-             id                 text
-            ,ident              text
-            ,type               text
-            ,name               text
-            ,latitude_deg       text
-            ,longitude_deg      text
-            ,elevation_ft       text
-            ,continent          text
-            ,iso_country        text
-            ,iso_region         text
-            ,municipality       text
-            ,scheduled_service  text
-            ,icao_code          text
-            ,iata_code          text
-            ,gps_code           text
-            ,local_code         text
-            ,home_link          text
-            ,wikipedia_link     text
-            ,keywords           text
-        )
-        ;
-        --create index if not exists ix_ods_airport_icao on ods.airport using btree (icao_code)
-        --;
+
+        with open(file_path, "r", encoding="utf-8") as file:
+            csv_reader_ex = csv_reader(file)
+            headers = next(csv_reader_ex)
 
 
-        drop table if exists ods.airport_tz
-        ;
-        create table if not exists ods.airport_tz (
-            iata_code text
-            ,tz       text
-        )
-        ;
-
-
-        drop table if exists ods.weather
-        ;
-        create table ods.weather (
-             icao_code   text
-            ,local_time  text
-            ,raw_t       text
-            ,raw_p0      text
-            ,raw_p       text
-            ,raw_u       text
-            ,raw_dd      text
-            ,raw_ff      text
-            ,raw_ff10    text
-            ,raw_ww      text
-            ,raw_w_w_    text
-            ,raw_c       text
-            ,raw_vv      text
-            ,raw_td      text
-        )
-        ;
-
+        columns = [f'"{header}" TEXT' for header in headers]
+        sql_drop = f"drop table if exists {ODS_AIRPORT_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = f"""
+            create table if not exists {ODS_AIRPORT_TABLE} (
+                {', '.join(columns)}
+            );
         """
+        sql_truncate = f"truncate table {ODS_AIRPORT_TABLE}"
 
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             cur = conn.cursor()
-            cur.execute(sql)
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
             conn.commit()
-            logger.info("ODS scheme and tables there were created")
+            logger.info("Table created successfully")
 
 
     @task.python(do_xcom_push=False)
@@ -384,6 +305,33 @@ def dag1() -> None:
                     sql_pg_copy_csv = f"copy {ODS_AIRPORT_TZ_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                     cur.copy_expert(sql_pg_copy_csv, file)
                     conn.commit()
+
+
+    @task.python(do_xcom_push=False)
+    def create_ods_weather_table() -> (XComArg | None):
+        """
+        creates ods.weather and truncate (if exists, truncate only)
+        :return:
+        """
+        icao_code, csv_gz_file = [(k, v) for k, v in WEATHER_CSV_GZ_FILE_DICT.items()][0]
+        s3_hook = S3Hook(aws_conn_id=AWS_CONN_ID)
+        file_path = s3_hook.download_file(
+            key=csv_gz_file,
+            bucket_name=TARGET_CSV_BUCKET,
+        )
+        header_lines = get_lines_from_gzip(file_path, icao_code, stop_line=8)
+
+        sql_drop = f"drop table if exists {ODS_WEATHER_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = get_ods_airport_table_ddl(header_lines)
+        sql_truncate = f"truncate table {ODS_WEATHER_TABLE}"
+
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
+            conn.commit()
+
 
 
     load_weather_csv_gz_to_db_tasks = []
@@ -497,6 +445,58 @@ def dag1() -> None:
             logger.info(log_info)
 
 
+    @task.python(do_xcom_push=False)
+    def create_ods_flight_table() -> (XComArg | None):
+        """
+        creates a table for flight data
+        :return: nothing, but actually airflow's XComArg
+        """
+        sql_drop = f"drop table if exists {ODS_FLIGHT_TABLE};"  # to change DDL in a single place the table is dropped
+        sql_create = f"""
+        create table if not exists {ODS_FLIGHT_TABLE} (
+             year                       integer
+            ,month                      integer
+            ,flight_dt                  text
+            ,carrier_code               text
+            ,tail_num                   text
+            ,carrier_flight_num         text
+            ,origin_code                text
+            ,origin_city_name           text
+            ,dest_code                  text
+            ,dest_city_name             text
+            ,scheduled_dep_tm           text
+            ,actual_dep_tm              text
+            ,dep_delay_min              numeric
+            ,dep_delay_group_num        numeric
+            ,wheels_off_tm              text
+            ,wheels_on_tm               text
+            ,scheduled_arr_tm           text
+            ,actual_arr_tm              text
+            ,arr_delay_min              numeric
+            ,arr_delay_group_num        numeric
+            ,cancelled_flg              numeric
+            ,cancellation_code          text
+            ,flights_cnt                numeric
+            ,distance                   numeric
+            ,distance_group_num         numeric
+            ,carrier_delay_min          numeric
+            ,weather_delay_min          numeric
+            ,nas_delay_min              numeric
+            ,security_delay_min         numeric
+            ,late_aircraft_delay_min    numeric
+        );
+        """
+        sql_truncate = f"truncate table {ODS_FLIGHT_TABLE};"
+
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_drop)
+            cur.execute(sql_create)
+            cur.execute(sql_truncate)
+            conn.commit()
+            logger.info("Table created successfully")
+
+
     load_flight_csv_to_db_tasks = []
 
     for csv_file in FLIGHT_CSV_FILE_LIST:
@@ -542,22 +542,23 @@ def dag1() -> None:
 
 
     @task.python(do_xcom_push=False)
-    def create_and_fill_stg_tables() -> (XComArg | None):
+    def create_stg_dds_schemas_and_stg_weather() -> (XComArg | None):
         """
-        create stg schema and tables if needed and fills them
+        creates stg and dds schemas and stg.weather table
         :return:
         """
         sql = """
-        create schema icreate schema if not exists stg
-        ;
-        
-        
-        --drop table if exists stg.weather
-        --;
+        create schema if not exists stg;
+        create schema if not exists dds;
+
+
+        create index if not exists ix_ods_airport_icao on ods.airport (icao_code);
+
+
         create table if not exists stg.weather (
              icao_code                            text
             ,dt                                   timestamp
-            ,temperature_cels_degree              numeric
+            ,temperature_celc_deegree             numeric
             ,pressure_station_merc_mlm            numeric
             ,pressure_see_level_merc_mlm          numeric
             ,humidity_prc                         numeric
@@ -568,57 +569,34 @@ def dag1() -> None:
             ,recent_weather_phenomena_operational text
             ,cloud_cover                          text
             ,horizontal_visibility_km             numeric
-            ,dewpoint_temperature_cels_deegree    numeric
-            ,load_dt                              timestamp
+            ,dewpoint_temperature_celc_deegree    numeric
         --     ,hash                                 text
         )
         ;
-        
-        
-        --drop table if exists stg.flight
-        --;
-        create table if not exists stg.flight (
-             year                     int
-            ,month                    int
-            ,dt                       date
-            ,carrier_code             text
-            ,tail_num                 text
-            ,carrier_flight_num       text
-            ,origin_code              text
-            ,origin_city_name         text
-            ,dest_code                text
-            ,dest_city_name           text
-            ,scheduled_dep_tm         text
-            ,actual_dep_tm            text
-            ,dep_delay_min            int
-            ,dep_delay_group_num      numeric
-            ,wheels_off_tm            text
-            ,wheels_on_tm             text
-            ,scheduled_arr_tm         text
-            ,actual_arr_tm            text
-            ,arr_delay_min            int
-            ,arr_delay_group_num      numeric
-            ,cancelled_flg            smallint
-            ,cancellation_code        text
-            ,flights_cnt              int
-            ,distance                 numeric
-            ,distance_group_num       numeric
-            ,carrier_delay_min        int
-            ,weather_delay_min        int
-            ,nas_delay_min            int
-            ,security_delay_min       int
-            ,late_aircraft_delay_min  int
-            ,load_dt                  timestamp
-        )
+
+
+        --truncate table stg.weather
         ;
-        
-        
-        -- fill stg.weather
+        """
+        with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql)
+            logger.info("Table created successfully")
+            conn.commit()
+
+
+    @task.python(do_xcom_push=False)
+    def incremental_fill_stg_weather() -> (XComArg | None):
+        """
+        creates stg.weather and fill it
+        :return:
+        """
+        sql = """
         with wt_ods as (
             select distinct
                  a.icao_code
                 ,case when a.local_time = '' then null else a.local_time end :: timestamp  as dt
-                ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_cels_deegree
+                ,case when a.raw_t      = '' then null else a.raw_t      end :: numeric    as temperature_celc_deegree
                 ,case when a.raw_p0     = '' then null else a.raw_p0     end :: numeric    as pressure_station_merc_mlm
                 ,case when a.raw_p      = '' then null else a.raw_p      end :: numeric    as pressure_see_level_merc_mlm
                 ,case when a.raw_u      = '' then null else a.raw_u      end :: numeric    as humidity_prc
@@ -629,8 +607,7 @@ def dag1() -> None:
                 ,case when a.raw_w_w_   = '' then null else a.raw_w_w_   end               as recent_weather_phenomena_operational
                 ,case when a.raw_c      = '' then null else a.raw_c      end               as cloud_cover
                 ,case when a.raw_vv     = '' then null else a.raw_vv     end :: numeric    as horizontal_visibility_km
-                ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_cels_deegree
-                ,localtimestamp  as load_dt
+                ,case when a.raw_td     = '' then null else a.raw_td     end :: numeric    as dewpoint_temperature_celc_deegree
             --     ,md5(
             --            a.raw_t    || a.raw_p0 || a.raw_p    || a.raw_u || a.raw_dd || a.raw_ff
             --         || a.raw_ff10 || a.raw_ww || a.raw_w_w_ || a.raw_c || a.raw_vv || a.raw_td
@@ -640,33 +617,6 @@ def dag1() -> None:
             where 1=1
         )
         
-        ,wt_ods_dq_fixing as (
-            select
-                -- it can be two equal records: with icao_code = 'KFSM' and local_time = '27.10.2024 04:53'
-                -- but with different other values
-                 icao_code
-                ,dt
-                ,max(temperature_cels_deegree)              as temperature_cels_deegree
-                ,max(pressure_station_merc_mlm)             as pressure_station_merc_mlm
-                ,max(pressure_see_level_merc_mlm)           as pressure_see_level_merc_mlm
-                ,max(humidity_prc)                          as humidity_prc
-                ,max(wind_direction)                        as wind_direction
-                ,max(wind_speed_meters_per_sec)             as wind_speed_meters_per_sec
-                ,max(max_gust_10m_meters_per_sec)           as max_gust_10m_meters_per_sec
-                ,max(special_present_weather_phenomena)     as special_present_weather_phenomena
-                ,max(recent_weather_phenomena_operational)  as recent_weather_phenomena_operational
-                ,max(cloud_cover)                           as cloud_cover
-                ,max(horizontal_visibility_km)              as horizontal_visibility_km
-                ,max(dewpoint_temperature_cels_deegree)     as dewpoint_temperature_cels_deegree
-                ,load_dt
-            from
-                wt_ods
-            where 1=1
-            group by
-                 icao_code
-                ,dt
-                ,load_dt
-        )
         
         ,wt_to_delete as (
             select
@@ -674,11 +624,12 @@ def dag1() -> None:
                 ,min(dt)  as min_dt
                 ,max(dt)  as max_dt
             from
-                wt_ods_dq_fixing
+                wt_ods
             where 1=1
             group by
                 icao_code
         )
+        
         
         ,wt_delete as (
             delete
@@ -689,126 +640,52 @@ def dag1() -> None:
             where 1=1
                 and tar1.icao_code = sou1.icao_code
                 and tar1.dt between sou1.min_dt and sou1.max_dt
-            returning tar1.*
+            returning *
         )
+        
         
         insert into stg.weather
         select
-            *
+             icao_code
+            ,dt
+            ,temperature_celc_deegree
+            ,pressure_station_merc_mlm
+            ,pressure_see_level_merc_mlm
+            ,humidity_prc
+            ,wind_direction
+            ,wind_speed_meters_per_sec
+            ,max_gust_10m_meters_per_sec
+            ,special_present_weather_phenomena
+            ,recent_weather_phenomena_operational
+            ,cloud_cover
+            ,horizontal_visibility_km
+            ,dewpoint_temperature_celc_deegree
         from
-            wt_ods_dq_fixing
+            wt_ods
         where 1=1
-            and (icao_code, dt) not in (
-                select
-                    icao_code, dt
-                from
-                    wt_delete
-            )
-         
         ;
+        
         
         create index if not exists ix_stg_weather_icao_dt on stg.weather (icao_code, dt)
         --create index ix_stg_weather_icao_dt_hash on stg.weather (icao_code, dt, hash)
         ;
-        
-        
-        
-        -- fill stg.flight
-        with wt_ods as (
-            select distinct
-                 year                                      :: int       as year
-                ,month                                     :: int       as month
-                ,to_date(flight_dt, 'mm/dd/yyyy hh:mi:ss') :: date      as dt
-                ,carrier_code                              :: text      as carrier_code
-                ,tail_num                                  :: text      as tail_num
-                ,carrier_flight_num                        :: text      as carrier_flight_num
-                ,origin_code                               :: text      as origin_airport_iata_code
-                ,origin_city_name                          :: text      as origin_city_name
-                ,dest_code                                 :: text      as dest_airport_iata_code
-                ,dest_city_name                            :: text      as dest_city_name
-                ,scheduled_dep_tm                          :: text      as scheduled_dep_tm
-                ,actual_dep_tm                             :: text      as actual_dep_tm
-                ,dep_delay_min                             :: int       as dep_delay_min
-                ,dep_delay_group_num                       :: numeric   as dep_delay_group_num
-                ,wheels_off_tm                             :: text      as wheels_off_tm
-                ,wheels_on_tm                              :: text      as wheels_on_tm
-                ,scheduled_arr_tm                          :: text      as scheduled_arr_tm
-                ,actual_arr_tm                             :: text      as actual_arr_tm
-                ,arr_delay_min                             :: int       as arr_delay_min
-                ,arr_delay_group_num                       :: numeric   as arr_delay_group_num
-                ,coalesce(cancelled_flg, 0)                :: smallint  as cancelled_flg
-                ,cancellation_code                         :: text      as cancellation_code
-                ,flights_cnt                               :: int       as flights_cnt
-                ,distance                                  :: numeric   as distance
-                ,distance_group_num                        :: numeric   as distance_group_num
-                ,carrier_delay_min                         :: int       as carrier_delay_min
-                ,weather_delay_min                         :: int       as weather_delay_min
-                ,nas_delay_min                             :: int       as nas_delay_min
-                ,security_delay_min                        :: int       as security_delay_min
-                ,late_aircraft_delay_min                   :: int       as late_aircraft_delay_min
-                ,localtimestamp  as load_dt
-            from
-                ods.flights
-            where 1=1
-        )
-        
-        ,wt_to_delete as (
-            -- there are a lot of doubles - a single flight can be cancelled several times per day
-            --  so we will delete all data for the period
-            select
-                 min(dt)  as min_dt
-                ,max(dt)  as max_dt
-            from
-                wt_ods
-            where 1=1
-        )
-        
-        ,wt_delete as (
-            delete
-            from
-                stg.flight  tar1
-            using
-                wt_to_delete  sou1
-            where 1=1
-                and tar1.dt between sou1.min_dt and sou1.max_dt
-            returning tar1.*
-        )
-        
-        insert into stg.flight
-        select
-            *
-        from
-            wt_ods
-        where 1=1
-            and dt not in (
-                select
-                    dt
-                from
-                    wt_delete
-            )
-        ;
         """
+        logger.info(sql)
+
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
-            logger.info("Start refreshing STG tables..")
             cur = conn.cursor()
             cur.execute(sql)
             conn.commit()
-            logger.debug("DDS tables refreshed")
 
 
 
     @task.python(do_xcom_push=False)
-    def create_dds_tables_and_fill_them() -> (XComArg | None):
+    def create_dds_weather_and_fill_it_as_an_scd() -> (XComArg | None):
         """
-        create dds schema and tables if needed and fills them
+        create dds.weather and fill it - with SCD, blackjack and whores
         :return:
         """
         sql = """
-        create schema if not exists dds;
-        
-        
-        --drop table if exists dds.weather
-        --;
         create table if not exists dds.weather (
              airport_rk text       -- ID аэропорта Подставляется из dds_dict.airport (справочник аэропортов) по известному ICAO коду (icao_code)
             ,w_speed    numeric    -- Скорость ветра Значение из поля w_speed
@@ -819,31 +696,8 @@ def dag1() -> None:
             ,load_dt    timestamp  -- Время загрузки Время data interval end
         )
         ;
-        
-        
-        --drop table if exists dds.flight
-        --;
-        create table if not exists dds.flight (
-             id                 text
-            ,carrier_code       text
-            ,tail_num           text
-            ,carrier_flight_num text
-            ,origin_airport_id  text
-            ,dt                 date
-            ,local_dttm         timestamp
-            ,cancel_flg         smallint
-            ,dest_airport_id    text
-            ,distance           int
-            ,dep_delay_min      text
-            ,delay_reason_list  text
-            ,hash               text
-            ,load_dt            timestamp
-        )
-        ;
-        
-        
-        
-        
+
+
         --explain analyze
         with wt_par as (
             select
@@ -855,8 +709,8 @@ def dag1() -> None:
                 ,null :: date  as from_dt
                 ,null :: date  as to_dt
         )
-        
-        
+
+
         ,wt_stg_table as (
             select
                  1  as priority
@@ -865,25 +719,25 @@ def dag1() -> None:
         
                 ,stg1.wind_speed_meters_per_sec    as w_speed
                 ,stg1.max_gust_10m_meters_per_sec  as max_gws
-                ,stg1.temperature_cels_degree      as t_deg
+                ,stg1.temperature_celc_deegree     as t_deg
         
                 -- ,md5(  -- doesnt' work - two equal values for different rows !!!
                 --        coalesce(stg1.wind_speed_meters_per_sec   :: text, '')
                 --     || coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
-                --     || coalesce(stg1.temperature_cels_degree    :: text, '')
+                --     || coalesce(stg1.temperature_celc_deegree    :: text, '')
                 -- )  as hash
         
                 ,concat_ws(
                      '::'
                     ,coalesce(stg1.wind_speed_meters_per_sec   :: text, '')
                     ,coalesce(stg1.max_gust_10m_meters_per_sec :: text, '')
-                    ,coalesce(stg1.temperature_cels_degree     :: text, '')
+                    ,coalesce(stg1.temperature_celc_deegree    :: text, '')
                 )  as hash
-        
+
                 ,localtimestamp  as load_dt
             from
                 stg.weather  stg1
-        
+
                 join wt_par  pa1
                     on  (pa1.airport_arr is null or stg1.icao_code = any(pa1.airport_arr))
                     and (pa1.from_dt     is null or stg1.dt       >= pa1.from_dt         )
@@ -916,7 +770,7 @@ def dag1() -> None:
                     ,coalesce(a.max_gws :: text, '')
                     ,coalesce(a.t_deg   :: text, '')
                 )  as hash
-        
+                
                 -- if the data exists than this is the old data - don't change the load_dt
                 ,a.load_dt  as load_dt
             from
@@ -1022,7 +876,7 @@ def dag1() -> None:
                     order by
                         min(dt)
                 ) - interval '1 millisecond'  as valid_to
-        
+                
                 ,max(load_dt)  as load_dt
             from
                 wt_group_key
@@ -1091,7 +945,7 @@ def dag1() -> None:
             where 1=1
                 and tar1.airport_rk = sou1.airport_rk
                 and tar1.valid_from between sou1.min_valid_from and sou1.max_valid_from
-            returning tar1.*
+            returning *
         )
         
         insert into dds.weather
@@ -1108,201 +962,13 @@ def dag1() -> None:
         from
             wt_fin
         where 1=1
-            and (airport_rk, valid_from, valid_to) not in (
-                select
-                    airport_rk, valid_from, valid_to
-                from wt_delete
-            )
-        ;
-        
-        --truncate table dds.weather
-        
-        
-        
-        
-        
-        with wt_par as (
-            select
-                --array[0, 1, 2, 3] :: int[]  as cancel_flg
-                array[0, 1] :: int[]  as cancel_flg
-        )
-        
-        ,wt_raw as (
-            select
-                 stg1.carrier_flight_num
-        
-                ,stg1.carrier_code
-                ,stg1.tail_num
-                ,stg1.cancelled_flg  as cancel_flg
-        
-                ,orig_airport1.id  as origin_airport_id
-                ,stg1.dt
-                ,stg1.actual_dep_tm
-        
-                ,to_timestamp(
-                    to_char(
-                        case
-                            when left(stg1.actual_dep_tm, 2) :: int >= 24
-                                then
-                                    stg1.dt + 1
-                            else
-                                stg1.dt
-                        end
-                        ,'yyyy-mm-dd'
-                    )
-        
-                    || ' ' || case
-                        when left(stg1.actual_dep_tm, 2) :: int >= 24
-                            then
-                                (left(stg1.actual_dep_tm, 2) :: int - 24) :: text
-                            else
-                                left(stg1.actual_dep_tm, 2)
-                    end
-                    || ':' || substr(stg1.actual_dep_tm, 3)
-                    ,'yyyy-mm-dd hh24:mi'
-                ) at time zone coalesce(orig_airport_tz1.tz, 'utc')  as local_dttm
-        
-                ,dest_airport1.id  as dest_airport_id
-        
-                ,stg1.distance
-                ,stg1.dep_delay_min
-                --,carrier_delay_min
-                --,weather_delay_min
-                --,nas_delay_min
-                --,security_delay_min
-                --,late_aircraft_delay_min
-        
-        
-                ,concat_ws(
-                    ', '
-                    ,case when coalesce(stg1.carrier_delay_min      , 0) > 0 then 'вина перевозчика' else null end
-                    ,case when coalesce(stg1.weather_delay_min      , 0) > 0 then 'погода' else null end
-                    ,case when coalesce(stg1.nas_delay_min          , 0) > 0 then 'NAS (National aviation services)' else null end
-                    ,case when coalesce(stg1.security_delay_min     , 0) > 0 then 'проверка безопасности' else null end
-                    ,case when coalesce(stg1.late_aircraft_delay_min, 0) > 0 then 'позднее прибытие самолета' else null end
-                )  as delay_reason
-                ,localtimestamp  as load_dt
-            from
-                stg.flight  stg1
-        
-                join wt_par  pa1
-                    on stg1.cancelled_flg = any(pa1.cancel_flg)
-        
-                join ods.airport  orig_airport1
-                    on orig_airport1.iata_code = stg1.origin_code
-        
-                join ods.airport  dest_airport1
-                    on dest_airport1.iata_code = stg1.dest_code
-        
-                left join ods.airport_tz  orig_airport_tz1
-                    on orig_airport_tz1.iata_code = orig_airport1.iata_code
-            where 1=1
-                --and carrier_code || '.' || tail_num || '.' || carrier_flight_num = '9E.N311PQ.4930'
-        )
-        
-        ,wt_delay_reason as (
-            select
-                *
-                ,case
-                    when dep_delay_min > 0 and delay_reason != ''
-                        then
-                            delay_reason
-                    when dep_delay_min > 0 and delay_reason = ''
-                        then
-                            'неизвестно'
-                    else
-                        null
-                end  as delay_reason_list
-            from
-                wt_raw
-        )
-        
-        ,wt_hash as (
-            select
-                          coalesce(carrier_code       :: text, '0')
-                || '.' || coalesce(tail_num           :: text, '0')
-                || '.' || coalesce(carrier_flight_num :: text, '0')
-                || '.' || coalesce(origin_airport_id  :: text, '0')
-                || '.' || coalesce(dt                 :: text, '0')
-                as id
-        
-                ,carrier_code
-                ,tail_num
-                ,carrier_flight_num
-                ,origin_airport_id
-                ,dt
-                ,local_dttm
-        
-                ,cancel_flg
-                ,dest_airport_id
-                ,distance
-                ,dep_delay_min
-                ,delay_reason_list
-        
-                ,concat_ws(
-                     '::'
-                    ,coalesce(cancel_flg        :: text, '')
-                    ,coalesce(dest_airport_id   :: text, '')
-                    ,coalesce(distance          :: text, '')
-                    ,coalesce(dep_delay_min     :: text, '')
-                    ,coalesce(delay_reason_list :: text, '')
-                )  as hash
-        
-                ,load_dt
-            from
-                wt_delay_reason
-            where 1=1
-                --and carrier_code || '.' || tail_num || '.' || carrier_flight_num = '9E.N311PQ.4930'
-        )
-        
-        
-        ,wt_dq as (
-            select
-                id
-                ,count(1)
-            from
-                wt_hash
-            where 1=1
-            group by
-                id
-            having 1=1
-                and count(1) > 1
-        )
-        
-        
-        ,wt_delete as (
-            delete
-            from
-                dds.flight  tar1
-            using
-                wt_hash  sou1
-            where 1=1
-                and tar1.id    = sou1.id
-                and tar1.hash != sou1.hash
-            returning tar1.*
-        )
-        
-        insert into dds.flight
-        select
-            *
-        from
-            wt_hash
-        where 1=1
-            and (id, hash) not in (
-                select
-                    id, hash
-                from
-                    wt_delete
-            )
         ;
         """
         logger.info(sql)
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
-            logger.debug("Start refreshing DDS tables ..")
             cur = conn.cursor()
             cur.execute(sql)
             conn.commit()
-            logger.debug("DDS tables refreshed")
 
 
     # (
@@ -1342,7 +1008,11 @@ def dag1() -> None:
         start
         >> download_airport_csv_file()
         >> copy_all_flight_files()
-        >> create_ods_tables()
+        >> [
+            create_ods_airport_table(),
+            create_ods_weather_table(),
+            create_ods_flight_table(),
+        ]
         >> start_csv_load
         >> write_airport_csv_to_ods_airport()
         >> stop_csv_load
@@ -1354,8 +1024,9 @@ def dag1() -> None:
             reduce(lambda x, y: x >> y, [start_csv_load] + load_flight_csv_to_db_tasks),
         ]
         >> stop_csv_load
-        >> create_and_fill_stg_tables()
-        >> create_dds_tables_and_fill_them()
+        >> create_stg_dds_schemas_and_stg_weather()
+        >> incremental_fill_stg_weather()
+        >> create_dds_weather_and_fill_it_as_an_scd()
         >> stop
     )
 
