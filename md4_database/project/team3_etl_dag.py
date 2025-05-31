@@ -3,7 +3,7 @@
 # aws s3 cp team3_etl_dag123.py s3://gsb2024airflow/team3_etl_dag123.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
 class Metadata:
-    version = 4
+    version = 5
     type = 'full dag'
 
 
@@ -21,6 +21,7 @@ from gzip import open as gzip_open
 from logging import getLogger, Filter, WARNING
 from os import path, unlink, environ
 from tempfile import NamedTemporaryFile
+from typing import List
 
 
 class SuppressRequestsFilter(Filter):
@@ -90,7 +91,6 @@ FLIGHT_CSV_FILE_LIST_RAW = {
 }
 FLIGHT_CSV_FILE_LIST = [f"{ETL_PARAM["root_file_path"]}/{i}" for i in FLIGHT_CSV_FILE_LIST_RAW]
 
-logger = LoggingMixin().log
 IS_LOCAL = "AIRFLOW_HOME" not in environ and "AIRFLOW__CORE__DAGS_FOLDER" not in environ
 if not IS_LOCAL:
     is_downloading_needed = Variable.get("ahremenko_ma_is_downloading_needed", default_var=False)
@@ -1584,14 +1584,14 @@ group by
 """
 
 
-def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, stop_line: int = None) -> list:
+def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, stop_line: int = None) -> List[list]:
     """
     get all rows from csv.gz as a list
     :param gz_filename: filename
     :param icao_code: code for insert to table in PG
     :param start_line: to exclude some lines before as they are not needed
     :param stop_line: to exclude some lines after if they are not needed
-    :return: list of lines
+    :return: list of lists (lines)
     """
     o_list = []
     with gzip_open(gz_filename, 'r') as gzfile:
@@ -1609,6 +1609,9 @@ def get_lines_from_gzip(gz_filename: str, icao_code: str, start_line: int = 6, s
         stop_line = None
     o_list = o_list[start_line:stop_line]
     return o_list
+
+
+logger = LoggingMixin().log
 
 
 @dag(**DAG_PARAM)
@@ -1797,7 +1800,7 @@ def dag1() -> None:
     @task.python(do_xcom_push=False)
     def write_airport_csv_to_dds_airport() -> (XComArg | None):
         """
-        write the airport data to the table from the tasks
+        writes the airport data to the table from the tasks
         :return: nothing, but actually airflow's XComArg
         """
         logger_task = getLogger("airflow.task")
@@ -1822,7 +1825,7 @@ def dag1() -> None:
     @task.python(do_xcom_push=False)
     def write_airport_tz_csv_to_dds_airport() -> (XComArg | None):
         """
-        write the airport data to the table from the tasks
+        writes airport timezone data to the table from the tasks
         :return: nothing, but actually airflow's XComArg
         """
         logger_task = getLogger("airflow.task")
@@ -1847,7 +1850,7 @@ def dag1() -> None:
     @task.python(do_xcom_push=True)
     def copy_from_gzip_to_ods_weather() -> (XComArg | None):
         """
-        insert weather data to a database's table  in a chain (not parallel) from 4 files
+        inserts weather data to a database's table  in a chain (not parallel) from 4 files
         :return: nothing, but actually airflow's XComArg
         """
         if IS_LOCAL: return
@@ -1887,6 +1890,10 @@ def dag1() -> None:
 
     @task.python(do_xcom_push=False)
     def copy_all_flight_files() -> (XComArg | None):
+        """
+        copies flight files from one s3 bucket to another
+        :return: nothing, but actually airflow's XComArg
+        """
         logger_task = getLogger("airflow.task")
         logger_task.setLevel(WARNING)
         logger_task.addFilter(SuppressRequestsFilter())
@@ -1930,7 +1937,7 @@ def dag1() -> None:
     @task.python(do_xcom_push=True)
     def copy_from_csv_to_ods_flight() -> (XComArg | None):
         """
-        insert flight data to a database's table in a chain (not parallel) from several files
+        inserts flight data to a database's table in a chain (not parallel) from several files
         :return: nothing, but actually airflow's XComArg
         """
         if IS_LOCAL:
@@ -1958,8 +1965,8 @@ def dag1() -> None:
     @task.python(do_xcom_push=False)
     def stg__create_and_fill_tables() -> (XComArg | None):
         """
-        create stg schema and tables if needed and fills them
-        :return:
+        creates stg schema and tables if needed and fills them
+        :return: nothing, but actually airflow's XComArg
         """
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             logger.info("Start refreshing stg tables..")
@@ -1973,8 +1980,8 @@ def dag1() -> None:
     @task.python(do_xcom_push=False)
     def dds__create_and_fill_tables() -> (XComArg | None):
         """
-        create dds schema and tables if needed and fills them
-        :return:
+        creates dds schema and tables if needed and fills them
+        :return: nothing, but actually airflow's XComArg
         """
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             logger.debug("Start refreshing dds tables ..")
@@ -1987,8 +1994,8 @@ def dag1() -> None:
     @task.python(do_xcom_push=False)
     def dm__create_and_fill_tables() -> (XComArg | None):
         """
-        create dds schema and tables if needed and fills them
-        :return:
+        creates dm schema and tables if needed and fills them
+        :return: nothing, but actually airflow's XComArg
         """
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
             logger.debug("Start refreshing dds tables ..")
