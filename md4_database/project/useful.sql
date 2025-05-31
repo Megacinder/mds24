@@ -324,3 +324,6 @@ group by
     ,carrier_flight_num
     ,actual_dep_tm
 having count(1) > 1
+
+
+-- aws s3 cp C:\stuff\hse\modul4_databases\airport_tz.csv s3://gsbdwhdata/ahremenko_ma/airport_tz.csv --endpoint-url=https://storage.yandexcloud.net --profile=dbdwh

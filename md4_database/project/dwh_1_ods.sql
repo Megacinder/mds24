@@ -39,49 +39,9 @@ create table if not exists ods.flight (
 ;
 
 
-drop table if exists ods.airport
-;
-create table if not exists ods.airport (
-	 id                 text
-	,ident              text
-	,type               text
-	,name               text
-	,latitude_deg       text
-	,longitude_deg      text
-	,elevation_ft       text
-	,continent          text
-	,iso_country        text
-	,iso_region         text
-	,municipality       text
-	,scheduled_service  text
-	,icao_code          text
-	,iata_code          text
-	,gps_code           text
-	,local_code         text
-	,home_link          text
-	,wikipedia_link     text
-	,keywords           text
-)
-;
---create index if not exists ix_ods_airport_icao on ods.airport using btree (icao_code)
---;
-
-
-drop table if exists ods.airport_tz
-;
-create table if not exists ods.airport_tz (
-    iata_code text
-    ,tz       text
-)
-;
-
-
-
-
-
 drop table if exists ods.weather
 ;
-create table ods.weather (
+create table if not exists ods.weather (
 	 icao_code   text
 	,local_time  text
 	,raw_t       text
