@@ -3,7 +3,7 @@
 # aws s3 cp team3_etl_dag123.py s3://gsb2024airflow/team3_etl_dag123.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
 class Metadata:
-    version = 2
+    version = 4
     type = 'full dag'
 
 
@@ -71,6 +71,11 @@ WEATHER_CSV_GZ_FILE_LIST = {
     "KNYL.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
     "KXNA.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz",
 }
+WEATHER_CSV_GZ_FILE_DICT = {
+    i[:4]: f"{ETL_PARAM["root_file_path"]}/{i}"
+    for i
+    in WEATHER_CSV_GZ_FILE_LIST
+}
 FLIGHT_CSV_FILE_LIST_RAW = {
     # "flight_2023-10.csv",
     # "flight_2023-11.csv",
@@ -82,11 +87,6 @@ FLIGHT_CSV_FILE_LIST_RAW = {
     "flight_2024-05.csv",
     "flight_2024-06.csv",
     "flight_2024-07.csv",
-}
-WEATHER_CSV_GZ_FILE_DICT = {
-    i[:4]: f"{ETL_PARAM["root_file_path"]}/{i}"
-    for i
-    in WEATHER_CSV_GZ_FILE_LIST
 }
 FLIGHT_CSV_FILE_LIST = [f"{ETL_PARAM["root_file_path"]}/{i}" for i in FLIGHT_CSV_FILE_LIST_RAW]
 
@@ -1619,6 +1619,7 @@ def dag1() -> None:
     start = EmptyOperator(task_id="start")
     stop = EmptyOperator(task_id="stop")
 
+
     @task.python(do_xcom_push=False)
     def download_airport_csv_file() -> (XComArg | None):
         """
@@ -1651,6 +1652,7 @@ def dag1() -> None:
             logger.info("File downloaded successfully")
         else:
             logger.info("We don't need to download airport csv file")
+
 
     @task.python(do_xcom_push=False)
     def create_ods_tables() -> (XComArg | None):
@@ -1698,6 +1700,8 @@ def dag1() -> None:
             ,late_aircraft_delay_min    text
         )
         ;
+        truncate table ods.flight
+        ;
 
 
         --drop table if exists ods.weather
@@ -1719,6 +1723,8 @@ def dag1() -> None:
             ,raw_td      text
         )
         ;
+        truncate table ods.weather
+        ;
 
         """
 
@@ -1727,6 +1733,7 @@ def dag1() -> None:
             cur.execute(sql)
             conn.commit()
             logger.info("ods scheme and tables there were created")
+
 
     @task.python(do_xcom_push=False)
     def create_dds_airport_plus_tz_tables() -> (XComArg | None):
@@ -1762,6 +1769,8 @@ def dag1() -> None:
             ,keywords           text
         )
         ;
+        truncate table dds.airport
+        ;
         create unique index if not exists ix_uniq_dds_airport_iata on dds.airport (iata_code)
         ;
 
@@ -1774,6 +1783,8 @@ def dag1() -> None:
             ,constraint dds_airport_tz_pk primary key (iata_code)
         )
         ;
+        truncate table dds.airport_tz
+        ;
         """
 
         with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
@@ -1781,6 +1792,7 @@ def dag1() -> None:
             cur.execute(sql)
             conn.commit()
             logger.info("dds airport tables has been created (or exist)")
+
 
     @task.python(do_xcom_push=False)
     def write_airport_csv_to_dds_airport() -> (XComArg | None):
@@ -1802,10 +1814,10 @@ def dag1() -> None:
             if file_path:
                 with open(file_path, "r") as file:
                     cur = conn.cursor()
-                    cur.execute(f"truncate table {REF_AIRPORT_TABLE}")
                     sql_pg_copy_csv = f"copy {REF_AIRPORT_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                     cur.copy_expert(sql_pg_copy_csv, file)
                     conn.commit()
+
 
     @task.python(do_xcom_push=False)
     def write_airport_tz_csv_to_dds_airport() -> (XComArg | None):
@@ -1827,7 +1839,6 @@ def dag1() -> None:
             if file_path:
                 with open(file_path, "r") as file:
                     cur = conn.cursor()
-                    cur.execute(f"truncate table {REF_AIRPORT_TZ_TABLE}")
                     sql_pg_copy_csv = f"copy {REF_AIRPORT_TZ_TABLE} from stdin with csv header delimiter as ',' quote '\"'"
                     cur.copy_expert(sql_pg_copy_csv, file)
                     conn.commit()
@@ -1859,16 +1870,20 @@ def dag1() -> None:
                 csv_writer_ex.writerows(rows)
                 tmp_path = tmp.name
 
+            logger.info("File loading: %s", csv_gz_file)
+            logger.info("First row: %s", rows[0])
+            logger.info("Last row: %s", rows[-1])
             with PostgresHook(postgres_conn_id=ETL_PARAM["pg_conn_id"]).get_conn() as conn:
                 with open(tmp_path, 'r') as file:
                     cur = conn.cursor()
-                    cur.execute(f"truncate table {ODS_WEATHER_TABLE}")
                     sql_pg_copy_csv = f"copy {ODS_WEATHER_TABLE} from stdin with csv delimiter as ',' quote '\"'"
+                    logger.info(sql_pg_copy_csv)
                     cur.copy_expert(sql_pg_copy_csv, file)
                     conn.commit()
 
             if tmp_path and path.exists(tmp_path):
                 unlink(tmp_path)
+
 
     @task.python(do_xcom_push=False)
     def copy_all_flight_files() -> (XComArg | None):
@@ -1910,6 +1925,7 @@ def dag1() -> None:
                 (Variable.get('ahremenko_ma_is_downloading_needed') is set to False
             """
             logger.info(log_info)
+
 
     @task.python(do_xcom_push=True)
     def copy_from_csv_to_ods_flight() -> (XComArg | None):
@@ -2009,3 +2025,6 @@ if __name__ == "__main__":
     DB_AIRPORT_WEATHER_PATH = getenv("DB_AIRPORT_WEATHER_PATH")
     CSV_GZ_FILE = f"{DB_AIRPORT_WEATHER_PATH}/KFLG.01.01.2024.01.01.2025.1.0.0.en.utf8.00000000.csv.gz"
     ICAO_CODE = "KFLG"
+    rows = get_lines_from_gzip(CSV_GZ_FILE, ICAO_CODE)
+
+    assert 0 != len(rows)
