@@ -1,26 +1,26 @@
-create schema if not exists mds;
+create schema if not exists dm;
 
 
---drop table if exists mds.airport_weather
---;
-create table if not exists mds.airport_weather (
-     rain_flg           int  --  Дождь w_phenomena включает 'rain' или ws_phenomena включает 'rain'
-    ,snow_flg           int  --  Снег w_phenomena включает 'snow' или ws_phenomena включает 'snow'
-    ,thunderstorm_flg   int  --  Гроза w_phenomena включает 'thunderstorm' или ws_phenomena включает 'thunderstorm'
-    ,fog_mist_flg       int  --  Туман/Мгла w_phenomena включает 'fog' или 'mist' или ws_phenomena включает 'fog' или 'mist'
-    ,drizzle_flg        int  --  Морось w_phenomena включает 'drizzle' или ws_phenomena включает 'drizzle'
-    ,freezing_flg       int  --  Холодно t < 0
-    ,w_speed            int  --  Скорость ветра Значение из поля w_speed
-    ,max_gws            int  --  Макс. порывы ветра Значение из поля max_gws
-    ,t_deg              int  --  Температура Значение из поля T
-    ,airport_rk         int  --  ID аэропорта вылета Подставляется из dds.airport по известному ICAO коду (icao_code)
+drop table if exists dm.airport_weather
+;
+create table if not exists dm.airport_weather (
+     rain_flg           smallint  --  Дождь w_phenomena включает 'rain' или ws_phenomena включает 'rain'
+    ,snow_flg           smallint  --  Снег w_phenomena включает 'snow' или ws_phenomena включает 'snow'
+    ,thunderstorm_flg   smallint  --  Гроза w_phenomena включает 'thunderstorm' или ws_phenomena включает 'thunderstorm'
+    ,fog_mist_flg       smallint  --  Туман/Мгла w_phenomena включает 'fog' или 'mist' или ws_phenomena включает 'fog' или 'mist'
+    ,drizzle_flg        smallint  --  Морось w_phenomena включает 'drizzle' или ws_phenomena включает 'drizzle'
+    ,freezing_flg       smallint  --  Холодно t < 0
+    ,w_speed            numeric  --  Скорость ветра Значение из поля w_speed
+    ,max_gws            numeric  --  Макс. порывы ветра Значение из поля max_gws
+    ,t_deg              numeric  --  Температура Значение из поля T
+    ,airport_rk         text  --  ID аэропорта вылета Подставляется из dds.airport по известному ICAO коду (icao_code)
     ,flights_cnt        int  --  Количество вылетевших рейсов
-    ,delay_min_avg      int  --  Средняя задержка вылета
-    ,valid_from_dttm    int  --  Начало периода Значение из поля loctime
-    ,valid_to_dttm      int  --  Окончание периода Следующее известное время сбора данных для этого аэропорта или дата в будущем 5999-01-01
+    ,delay_min_avg      numeric  --  Средняя задержка вылета
+    ,valid_from_dttm    timestamp  --  Начало периода Значение из поля loctime
+    ,valid_to_dttm      timestamp  --  Окончание периода Следующее известное время сбора данных для этого аэропорта или дата в будущем 5999-01-01
     --,processed_dttm     int  --  Время загрузки Время data interval end
-    ,load_dt            int  --  Время загрузки Время data interval end
-    ,constraint mds_airport_weather_pk primary key (airport_rk, valid_from_dttm)
+    ,load_dt            timestamp  --  Время загрузки Время data interval end
+    ,constraint dm_airport_weather_pk primary key (airport_rk, valid_from_dttm)
 )
 ;
 
@@ -182,6 +182,7 @@ with wt_flag as (
     where 1=1
 )
 
+insert into dm.airport_weather
 select
      a.rain_flg
     ,a.snow_flg

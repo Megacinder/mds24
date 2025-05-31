@@ -1,6 +1,6 @@
 # aws s3 cp team3_step1_download_airport_csv.py s3://gsbdwhdata/ahremenko_ma/team3_step1_download_airport_csv.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 # aws s3 cp team3_step1_download_airport_csv.py s3://gsb2024airflow/team3_step1_download_airport_csv.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
-# aws s3 cp team3_etl_dag.py s3://gsb2024airflow/team3_etl_dag.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
+# aws s3 cp team3_etl_dag123.py s3://gsb2024airflow/team3_etl_dag123.py --profile dbdwh --endpoint-url=https://storage.yandexcloud.net
 
 
 from airflow.decorators import dag, task
